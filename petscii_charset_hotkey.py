@@ -1,0 +1,159 @@
+"""
+PETSCII Character Set und Color Codes für C64 BBS Terminal
+Unterstützt Upper/Graphics und Lower/Upper Charsets
+"""
+
+# C64 Farbpalette (original RGB-Werte)
+C64_COLORS = {
+    0: (0x00, 0x00, 0x00),  # Black
+    1: (0xFF, 0xFF, 0xFF),  # White
+    2: (0x88, 0x00, 0x00),  # Red
+    3: (0xAA, 0xFF, 0xEE),  # Cyan
+    4: (0xCC, 0x44, 0xCC),  # Purple
+    5: (0x00, 0xCC, 0x55),  # Green
+    6: (0x00, 0x00, 0xAA),  # Blue
+    7: (0xEE, 0xEE, 0x77),  # Yellow
+    8: (0xDD, 0x88, 0x55),  # Orange
+    9: (0x66, 0x44, 0x00),  # Brown
+    10: (0xFF, 0x77, 0x77), # Light Red
+    11: (0x33, 0x33, 0x33), # Dark Grey
+    12: (0x77, 0x77, 0x77), # Grey
+    13: (0xAA, 0xFF, 0x66), # Light Green
+    14: (0x00, 0x88, 0xFF), # Light Blue
+    15: (0xBB, 0xBB, 0xBB), # Light Grey
+}
+
+# PETSCII Control Codes
+PETSCII_CONTROL = {
+    # Cursor Movement
+    0x13: 'HOME',
+    0x93: 'CLR',
+    0x14: 'DEL',
+    0x94: 'INS',
+    0x11: 'CRSR_DOWN',
+    0x91: 'CRSR_UP',
+    0x1D: 'CRSR_RIGHT',
+    0x9D: 'CRSR_LEFT',
+    
+    # Colors (Ctrl codes)
+    0x05: 'WHITE',
+    0x1C: 'RED',
+    0x1E: 'GREEN',
+    0x1F: 'BLUE',
+    0x81: 'ORANGE',
+    0x90: 'BLACK',
+    0x95: 'BROWN',
+    0x96: 'LT_RED',
+    0x97: 'GREY1',
+    0x98: 'GREY2',
+    0x99: 'LT_GREEN',
+    0x9A: 'LT_BLUE',
+    0x9B: 'GREY3',
+    0x9C: 'PURPLE',
+    0x9E: 'YELLOW',
+    0x9F: 'CYAN',
+    
+    # Display modes
+    0x12: 'RVS_ON',
+    0x92: 'RVS_OFF',
+    0x0E: 'CHARSET_LOWER',
+    0x8E: 'CHARSET_UPPER',
+}
+
+# PETSCII zu Unicode Mapping (Upper/Graphics)
+PETSCII_TO_UNICODE_UPPER = {
+    # Basic ASCII range
+    0x20: ' ', 0x21: '!', 0x22: '"', 0x23: '#', 0x24: '$', 0x25: '%', 0x26: '&', 0x27: "'",
+    0x28: '(', 0x29: ')', 0x2A: '*', 0x2B: '+', 0x2C: ',', 0x2D: '-', 0x2E: '.', 0x2F: '/',
+    0x30: '0', 0x31: '1', 0x32: '2', 0x33: '3', 0x34: '4', 0x35: '5', 0x36: '6', 0x37: '7',
+    0x38: '8', 0x39: '9', 0x3A: ':', 0x3B: ';', 0x3C: '<', 0x3D: '=', 0x3E: '>', 0x3F: '?',
+    0x40: '@',
+    
+    # Uppercase A-Z
+    0x41: 'A', 0x42: 'B', 0x43: 'C', 0x44: 'D', 0x45: 'E', 0x46: 'F', 0x47: 'G', 0x48: 'H',
+    0x49: 'I', 0x4A: 'J', 0x4B: 'K', 0x4C: 'L', 0x4D: 'M', 0x4E: 'N', 0x4F: 'O', 0x50: 'P',
+    0x51: 'Q', 0x52: 'R', 0x53: 'S', 0x54: 'T', 0x55: 'U', 0x56: 'V', 0x57: 'W', 0x58: 'X',
+    0x59: 'Y', 0x5A: 'Z',
+    
+    0x5B: '[', 0x5C: '£', 0x5D: ']', 0x5E: '↑', 0x5F: '←',
+    
+    # Graphics characters (0x60-0x7F) - Box drawing chars
+    0x60: '─', 0x61: '♠', 0x62: '│', 0x63: '╱', 0x64: '╲', 0x65: '╲', 0x66: '╱', 0x67: '╲',
+    0x68: '╱', 0x69: '╲', 0x6A: '╱', 0x6B: '┐', 0x6C: '┌', 0x6D: '┘', 0x6E: '└', 0x6F: '┼',
+    0x70: '●', 0x71: '♥', 0x72: '║', 0x73: '○', 0x74: '♣', 0x75: '═', 0x76: '♦', 0x77: '┼',
+    0x78: '╬', 0x79: '╔', 0x7A: '╗', 0x7B: '╚', 0x7C: '╝', 0x7D: '╩', 0x7E: '╦', 0x7F: '╠',
+    
+    # Reverse characters (0xA0-0xBF) - mapped to normal for now
+    0xA0: '▌', 0xA1: '▌', 0xA2: '▌', 0xA3: '▌', 0xA4: '▌', 0xA5: '▌', 0xA6: '▌', 0xA7: '▌',
+    0xA8: '▌', 0xA9: '▌', 0xAA: '▌', 0xAB: '▌', 0xAC: '▌', 0xAD: '▌', 0xAE: '▌', 0xAF: '▌',
+    
+    # Graphics chars continued
+    0xC0: '─', 0xDB: '█', 0xDD: '▐', 0xDE: '▀', 0xDF: '▄', 0xE0: '░',
+}
+
+# PETSCII zu Unicode Mapping (Lower/Upper) - Lowercase mode
+PETSCII_TO_UNICODE_LOWER = {
+    **PETSCII_TO_UNICODE_UPPER,  # Inherit base mappings
+    
+    # Lowercase a-z (in Lower mode, 0x41-0x5A becomes lowercase)
+    0x41: 'a', 0x42: 'b', 0x43: 'c', 0x44: 'd', 0x45: 'e', 0x46: 'f', 0x47: 'g', 0x48: 'h',
+    0x49: 'i', 0x4A: 'j', 0x4B: 'k', 0x4C: 'l', 0x4D: 'm', 0x4E: 'n', 0x4F: 'o', 0x50: 'p',
+    0x51: 'q', 0x52: 'r', 0x53: 's', 0x54: 't', 0x55: 'u', 0x56: 'v', 0x57: 'w', 0x58: 'x',
+    0x59: 'y', 0x5A: 'z',
+    
+    # Uppercase in lower mode (0xC1-0xDA)
+    0xC1: 'A', 0xC2: 'B', 0xC3: 'C', 0xC4: 'D', 0xC5: 'E', 0xC6: 'F', 0xC7: 'G', 0xC8: 'H',
+    0xC9: 'I', 0xCA: 'J', 0xCB: 'K', 0xCC: 'L', 0xCD: 'M', 0xCE: 'N', 0xCF: 'O', 0xD0: 'P',
+    0xD1: 'Q', 0xD2: 'R', 0xD3: 'S', 0xD4: 'T', 0xD5: 'U', 0xD6: 'V', 0xD7: 'W', 0xD8: 'X',
+    0xD9: 'Y', 0xDA: 'Z',
+}
+
+# Color code to color number mapping
+COLOR_CODES = {
+    0x05: 1,  # WHITE
+    0x1C: 2,  # RED
+    0x1E: 5,  # GREEN
+    0x1F: 6,  # BLUE
+    0x81: 8,  # ORANGE
+    0x90: 0,  # BLACK
+    0x95: 9,  # BROWN
+    0x96: 10, # LT_RED
+    0x97: 11, # GREY1
+    0x98: 12, # GREY2
+    0x99: 13, # LT_GREEN
+    0x9A: 14, # LT_BLUE
+    0x9B: 15, # GREY3
+    0x9C: 4,  # PURPLE
+    0x9E: 7,  # YELLOW
+    0x9F: 3,  # CYAN
+}
+
+def get_petscii_char(byte_val, charset='upper'):
+    """
+    Konvertiert PETSCII Byte zu Unicode Character
+    
+    Args:
+        byte_val: PETSCII byte value (0-255)
+        charset: 'upper' oder 'lower' mode
+        
+    Returns:
+        Unicode character string
+    """
+    mapping = PETSCII_TO_UNICODE_LOWER if charset == 'lower' else PETSCII_TO_UNICODE_UPPER
+    return mapping.get(byte_val, '?')
+
+def is_control_code(byte_val):
+    """Check if byte is a PETSCII control code"""
+    return byte_val in PETSCII_CONTROL
+
+def get_control_name(byte_val):
+    """Get control code name"""
+    return PETSCII_CONTROL.get(byte_val, 'UNKNOWN')
+
+def is_color_code(byte_val):
+    """Check if byte is a color control code"""
+    return byte_val in COLOR_CODES
+
+def get_color_number(byte_val):
+    """Get C64 color number from control byte"""
+    return COLOR_CODES.get(byte_val, 14)  # Default: Light Blue

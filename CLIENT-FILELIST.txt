@@ -1,0 +1,443 @@
+# PYCGMS V1.0 Terminal Client - File List
+# Package Contents for BBS Users
+
+## Core Terminal Modules
+
+### Main Application
+- **bbs_terminal.py** - Main terminal window
+  - PETSCII display and input
+  - Protocol selection (F7)
+  - File upload (F1) with multi-file support
+  - File download with progress display
+  - Traffic logger (F12)
+  - BBS dialer
+  - Settings management
+  - Auto-login support
+
+### File Transfer
+- **file_transfer.py** - Complete YModem protocol
+  - YModem Batch (multi-file)
+  - XModem-1K (single file)
+  - Smart protocol detection
+  - Auto .prg extension handling
+  - Progress callbacks
+  - Save dialog for XModem-1K
+
+### Connection Handling
+- **telnet_client.py** - Telnet protocol implementation
+  - IAC command handling
+  - ECHO/SGA negotiation
+  - Binary mode support
+  - Line buffering
+
+- **bbs_connection.py** - BBS connection manager
+  - Connection state tracking
+  - Session management
+  - Auto-reconnect
+  - Buffer handling
+
+### PETSCII Support
+- **c64_keyboard.py** - PETSCII keyboard mapping
+  - Special character mapping (£, π, ←, ↑)
+  - Color code handling
+  - Control character support
+  - Shift states
+
+## Fonts
+
+### Required Font
+- **fonts/C64_Pro_Mono-STYLE.ttf** - C64 authentic font
+  - Fixed-width characters
+  - Complete PETSCII charset
+  - Authentic C64 look
+  - Sizes 8-16pt supported
+
+**Installation:**
+- Automatically loaded from `fonts/` directory
+- No system installation needed
+
+## Documentation
+- **CLIENT-README.md** - Complete user documentation
+  - Installation guide (Windows/Linux/macOS)
+  - Usage instructions
+  - Keyboard shortcuts
+  - Protocol guide
+  - Troubleshooting
+
+- **INSTALL.md** - Quick installation guide
+  - Step-by-step for all platforms
+  - Troubleshooting common issues
+  - Verification steps
+
+- **CLIENT-FILELIST.txt** - This file
+
+## Installation Scripts
+
+### Windows
+- **install-windows.bat** - Automated installer
+  - Checks Python installation
+  - Installs required packages (Pillow)
+  - Creates desktop shortcut
+  - Creates Start Menu entry
+  - Launches terminal
+
+### Linux
+- **install-linux.sh** - Automated installer
+  - Checks Python/pip/Tkinter
+  - Installs required packages
+  - Installs font to user directory
+  - Creates application launcher
+  - Creates command-line script
+  - Launches terminal
+
+**Usage:**
+```bash
+# Windows
+install-windows.bat
+
+# Linux
+chmod +x install-linux.sh
+./install-linux.sh
+```
+
+## Configuration Files
+
+Created automatically on first run:
+- **bbs_list.json** - Saved BBS connections
+  - Host, port, encoding
+  - Auto-login credentials
+  - Custom settings per BBS
+
+- **settings.json** - Terminal settings
+  - Font size
+  - Default folders
+  - Protocol preference
+  - Display options
+
+## Required Python Packages
+
+Install with:
+```bash
+pip install pillow
+```
+
+That's it! Only one dependency.
+
+## Directory Structure
+
+After extraction:
+```
+pycgms-client/
+├── bbs_terminal.py         # Main program (run this!)
+├── file_transfer.py        # YModem protocol
+├── telnet_client.py        # Telnet handling
+├── bbs_connection.py       # Connection manager
+├── c64_keyboard.py         # PETSCII keyboard
+├── install-windows.bat     # Windows installer
+├── install-linux.sh        # Linux installer (chmod +x first!)
+├── fonts/
+│   └── C64_Pro_Mono-STYLE.ttf
+├── CLIENT-README.md        # Documentation
+├── INSTALL.md              # Installation guide
+├── CLIENT-FILELIST.txt     # This file
+├── bbs_list.json          # Created on first run
+├── settings.json          # Created on first run
+└── run.sh                 # Created by Linux installer
+```
+
+Downloads/uploads go to folders you configure!
+
+## File Sizes (Approximate)
+
+| File | Size | Description |
+|------|------|-------------|
+| bbs_terminal.py | 95 KB | Main terminal |
+| file_transfer.py | 70 KB | YModem protocol |
+| telnet_client.py | 12 KB | Telnet |
+| bbs_connection.py | 8 KB | Connection |
+| c64_keyboard.py | 15 KB | Keyboard |
+| C64_Pro_Mono-STYLE.ttf | 45 KB | Font |
+| install-windows.bat | 5 KB | Windows installer |
+| install-linux.sh | 8 KB | Linux installer |
+| CLIENT-README.md | 25 KB | Documentation |
+| INSTALL.md | 10 KB | Install guide |
+
+**Total:** ~293 KB
+
+## Quick Start
+
+### Windows (Automated)
+```cmd
+1. Extract ZIP to C:\PYCGMS
+2. Double-click: install-windows.bat
+3. Follow prompts
+4. PYCGMS launches automatically!
+```
+
+### Windows (Manual)
+```cmd
+1. Extract ZIP to C:\PYCGMS
+2. Open Command Prompt:
+   cd C:\PYCGMS
+   pip install pillow
+   python bbs_terminal.py
+```
+
+### Linux (Automated)
+```bash
+1. Extract ZIP to ~/pycgms
+2. Open Terminal:
+   cd ~/pycgms
+   chmod +x install-linux.sh
+   ./install-linux.sh
+3. Follow prompts
+4. PYCGMS launches automatically!
+```
+
+### Linux (Manual)
+```bash
+1. Extract ZIP to ~/pycgms
+2. Open Terminal:
+   cd ~/pycgms
+   pip3 install pillow
+   python3 bbs_terminal.py
+```
+
+**Recommended:** Use automated installers for easiest setup!
+
+## First Connection
+
+1. **Click "Add BBS"**
+   ```
+   Name: Quantum Realm BBS
+   Host: bbs.example.com
+   Port: 6400
+   Encoding: PETSCII
+   ```
+
+2. **Double-click to connect**
+
+3. **Press F7 to select protocol**
+   ```
+   Recommended: YMODEM (option 4)
+   ```
+
+4. **Upload file: Press F1**
+   - Single file → Auto XModem-1K
+   - Multi files (Ctrl+Click) → YModem Batch
+
+5. **Download: BBS initiates**
+   - Progress shows: "filename.prg: Block 5 (5120/43434, 11%)"
+
+## Keyboard Shortcuts Reference
+
+### File Operations
+- **F1** - Upload file(s)
+- **F2** - Send text file
+- **F7** - Change protocol
+
+### Display
+- **F5** - Clear screen
+- **F12** - Toggle traffic logger
+- **PgUp/PgDn** - Scroll
+
+### Connection
+- **F3** - Disconnect
+- **Alt+N** - New BBS
+- **Alt+C** - Connect
+
+### Editing
+- **Ctrl+C** - Copy
+- **Ctrl+V** - Paste
+- **Ctrl+,** - Settings
+
+## Protocol Capabilities
+
+| Protocol | Upload Single | Upload Multi | Download | CPS Track |
+|----------|--------------|--------------|----------|-----------|
+| XMODEM | ✅ | ❌ | ✅ | ❌ |
+| XMODEMCRC | ✅ | ❌ | ✅ | ❌ |
+| XMODEM1K | ✅ | ❌ | ✅ | ❌ |
+| **YMODEM** | ✅ XM1K | ✅ Batch | ✅ | Server |
+| ZMODEM | ❌ | ❌ | ❌ | ❌ |
+
+**Recommended:** Use YMODEM for best compatibility and features!
+
+## Special Features
+
+### Multi-File Upload (YModem)
+```
+1. Press F1
+2. Hold Ctrl and click multiple files
+3. Click Open
+4. Terminal shows: "📤 Batch upload: 3 files using YModem"
+5. Each file sent with header (name + size)
+```
+
+### Traffic Logger
+```
+1. Press F12 before operation
+2. Perform upload/download
+3. Press F12 to stop
+4. File saved: traffic_log_YYYYMMDD_HHMMSS.txt
+```
+
+Example log:
+```
+[14:28:41.896] SEND → | 4E
+                  ASCII | N
+                  LEN   | 1 bytes
+```
+
+### Auto-Login
+```
+1. Right-click BBS entry
+2. Select "Edit"
+3. Enter Username/Password
+4. Check "Enable Auto-Login"
+5. Save
+6. Connect → Automatic login!
+```
+
+## Display Features
+
+### PETSCII Colors
+All 16 C64 colors supported:
+- Black, White, Red, Cyan
+- Purple, Green, Blue, Yellow
+- Orange, Brown, Light Red/Green/Blue
+- Dark Gray, Gray, Light Gray
+
+### Special Characters
+Authentic C64 character set:
+- Graphics characters (▌▐▀▄)
+- Inverse video (reverse)
+- Shifted characters
+- Control codes (clear, home, etc.)
+
+## Troubleshooting Files
+
+If you encounter issues, check/send:
+
+1. **Traffic Log** (F12)
+   - Shows all sent/received data
+   - Helps diagnose protocol issues
+
+2. **Transfer Debug Log**
+   - Auto-created during transfers
+   - File: `transfer_debug_YYYYMMDD_HHMMSS.log`
+   - Shows detailed protocol flow
+
+3. **Settings File**
+   - `settings.json` - Your preferences
+   - Can delete to reset to defaults
+
+4. **BBS List**
+   - `bbs_list.json` - Saved connections
+   - Can edit manually if needed
+
+## Backup Your Data
+
+Recommended to backup:
+```
+bbs_list.json    # Your BBS connections
+settings.json    # Your preferences
+```
+
+Everything else can be re-extracted from ZIP.
+
+## Updates
+
+To update to a new version:
+
+1. **Backup** your config files:
+   - `bbs_list.json`
+   - `settings.json`
+
+2. **Extract** new version to new folder
+
+3. **Copy** config files to new folder
+
+4. **Run** new version
+
+## Protocol Capabilities
+
+| Protocol | Upload Single | Upload Multi | Download | Speed | CPS Track |
+|----------|--------------|--------------|----------|-------|-----------|
+| XMODEM | ✅ | ❌ | ✅ | Slow | ❌ |
+| XMODEMCRC | ✅ | ❌ | ✅ | Slow | ❌ |
+| XMODEM1K | ✅ | ❌ | ✅ | Medium | ❌ |
+| **YMODEM** | ✅ XM1K | ✅ Batch | ✅ | Medium | Server |
+| **TURBOMODEM** | ✅ | ❌ | ✅ | **Ultra Fast** | Server |
+
+**Recommended:** 
+- **YModem** for batch transfers and compatibility
+- **TurboModem** for maximum speed (20-25x faster than XModem!)
+
+## Known Limitations
+
+- **Binary Mode:** Text mode only (PETSCII/Latin-1/UTF-8)
+- **SSH:** Not supported (Telnet only)
+- **File Size:** Large files (>10MB) may be slow with XModem
+
+## Performance Tips
+
+### For Fast Transfers
+1. Use **YModem** protocol (F7)
+2. Close other applications
+3. Good network connection helps
+4. Local BBS = faster than internet
+
+### For Stability
+1. Update to latest version
+2. Use default settings first
+3. Enable traffic log only when needed
+4. Close/reopen if connection hangs
+
+## Version History
+
+### v1.0 (January 2026) - PYCGMS Release
+- **New Name:** PYCGMS V1.0 by lA-sTYLe/Quantum
+- **YModem:** Complete implementation
+- **Multi-Upload:** Support for multiple files
+- **Smart Mode:** Auto XModem-1K vs YModem Batch
+- **Progress:** Shows filename and percentage
+- **Extensions:** Auto .prg handling
+- **Traffic Logger:** F12 key toggle
+- **Save Dialog:** For XModem-1K downloads
+
+### v3.3 (Previous)
+- PETSCII terminal
+- Basic XModem transfers
+- Auto-login
+
+## Credits
+
+**Developer:** lA-sTYLe/Quantum  
+**Year:** 2026  
+**Font:** C64 Pro Mono by Style  
+**Python:** 3.8+  
+**License:** Free for personal use
+
+**Libraries Used:**
+- Tkinter (GUI)
+- Pillow (Image processing)
+- Socket (Networking)
+
+## Support
+
+**Documentation:** CLIENT-README.md (detailed guide)  
+**Issues:** Check GitHub or contact developer  
+**BBS Community:** Ask on your favorite BBS!
+
+## License
+
+Free for personal use.  
+Do not sell or redistribute modified versions without permission.
+
+© 2026 lA-sTYLe/Quantum
+
+---
+
+**Ready to Connect?**  
+Run `python bbs_terminal.py` and explore the world of C64 BBSs!

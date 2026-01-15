@@ -38,8 +38,7 @@ A modern Python-based terminal emulator for connecting to Commodore 64 BBS syste
   - Cursor navigation with arrow keys
 
 ### 📜 Scrollback Buffer
-- **10,000 lines** of history
-- **Alt+S** to view scrollback
+- **F4** to view scrollback
 - **Search functionality**
 - **Copy to clipboard**
 
