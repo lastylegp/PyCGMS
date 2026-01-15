@@ -49,11 +49,13 @@ A modern Python-based terminal emulator for connecting to Commodore 64 BBS syste
 ### Requirements
 - Python 3.8+
 - Pillow (PIL)
+- Pygame
 - tkinter (usually included with Python)
 
 ### Install Dependencies
 ```bash
 pip install pillow
+pip install pygame
 ```
 
 ### Required Font Files
