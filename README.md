@@ -262,12 +262,15 @@ terminal/
 - Simpler handshake than YModem
 
 **TurboModem:**
-- Custom high-speed protocol
-- Automatic filename transfer
-- Optimized for C64 serial speed
+- Custom high-speed streaming window 8x4k Pufferprotocol
+- Automatic Filename transfer , multifile
 
 **Punter:**
-- Native Üunter C1 implementation for up and Download
+- Native Punter C1 implementation for up and Download
+
+**RAWTCP**
+- Custom High-speed streaming protocol 
+- Automatic Filename transfer , multifile
 
 ## Known Limitations
 

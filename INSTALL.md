@@ -34,8 +34,11 @@ If automatic installer doesn't work:
    ```cmd
    python -m pip install pillow
    ```
-
-3. **Run Terminal**
+3. **Install pygame**
+   ```cmd
+   python -m pip install pygame
+   ```
+4. **Run Terminal**
    ```cmd
    python bbs_terminal.py
    ```
@@ -70,21 +73,24 @@ If automatic installer doesn't work:
 1. **Install Python 3.8+** (usually pre-installed)
    ```bash
    # Ubuntu/Debian
-   sudo apt install python3 python3-pip python3-tk
+   sudo apt install python3 python3-pip python3-tk python3-pygame
 
    # Fedora/RHEL
-   sudo dnf install python3 python3-pip python3-tkinter
+   sudo dnf install python3 python3-pip python3-tkinter python3-pygame
 
    # Arch
-   sudo pacman -S python python-pip tk
+   sudo pacman -S python python-pip tk pygame
    ```
 
 2. **Install Pillow**
    ```bash
    pip3 install --user pillow
    ```
-
-3. **Run Terminal**
+3. **Install pygame**
+   ```cmd
+   python -m pip install pygame
+   ```
+4. **Run Terminal**
    ```bash
    python3 bbs_terminal.py
    ```
@@ -106,6 +112,10 @@ macOS is similar to Linux:
 3. **Install Pillow**
    ```bash
    pip3 install pillow
+   ```
+4. **Install pygame**
+   ```bash
+   pip3 install pygame
    ```
 
 4. **Run Terminal**
