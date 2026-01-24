@@ -2,6 +2,10 @@
 C64 ROM Font Renderer
 Verwendet die Original C64 ROM Character Bitmaps (upper.bmp/lower.bmp)
 Genau wie CGTerm
+
+Version 3.4:
+- Globaler Screen-Hintergrund (screen_bg) für CCGMS/Novaterm CTRL-B Support
+- Font-Format bleibt unverändert (RGB mit schwarzem Hintergrund)
 """
 
 from PIL import Image, ImageDraw
@@ -232,13 +236,22 @@ class C64ROMFontRenderer:
     
     def render(self):
         """
-        Rendert den kompletten Screen
+        Rendert den kompletten Screen (normal 25 Zeilen)
+        
+        CCGMS/Novaterm kompatibel:
+        - screen.screen_bg wird als globaler Hintergrund verwendet
         """
-        # Berechne Bild-Größe dynamisch (für unlimited_growth!)
+        # Bild-Größe (normal 40x25 oder 80x25)
         img_width = self.screen.width * self.char_width
         img_height = self.screen.height * self.char_height
         
-        bg_color = self.palette[self.screen.current_bg]
+        # Globaler Hintergrund aus screen.screen_bg (CTRL-B setzt diesen!)
+        if hasattr(self.screen, 'screen_bg'):
+            bg_color_idx = self.screen.screen_bg
+        else:
+            bg_color_idx = 0  # Fallback: Schwarz
+        
+        bg_color = self.palette[bg_color_idx]
         img = Image.new('RGB', (img_width, img_height), bg_color)
         
         # Welcher Font?
@@ -248,21 +261,18 @@ class C64ROMFontRenderer:
         for y in range(self.screen.height):
             for x in range(self.screen.width):
                 cell = self.screen.buffer[y][x]
-                self._render_cell(img, current_font, x, y, cell, bg_color)
+                self._render_cell(img, current_font, x, y, cell, bg_color_idx)
         
         return img
     
-    def _render_cell(self, dest, font_surface, x, y, cell, bg_color):
+    def _render_cell(self, dest, font_surface, x, y, cell, global_bg_idx):
         """
         Rendert eine Zelle
         Wie CGTerm gfx_draw_line() - Zeile 413-418
         
-        Font-Surface ist nach SCREENCODE indexiert!
-        cell.char enthält SCREENCODE als chr()
-        RVS wird durch Bit 7 gehandhabt (im Font bereits eingebaut)
+        Bei nicht-schwarzem Hintergrund: Schwarze Pixel durch Hintergrund ersetzen
         """
         # Hole SCREENCODE aus Cell
-        # cell.char kann int (screencode direkt) oder str sein
         if isinstance(cell.char, int):
             screencode = cell.char
         elif cell.char and len(cell.char) == 1:
@@ -274,7 +284,7 @@ class C64ROMFontRenderer:
         if cell.reverse:
             screencode |= 0x80
         
-        # Farbe - KEINE Vertauschung, das macht der Font!
+        # Farbe
         fg_idx = cell.fg_color
         
         # Position im Font-Surface (SCREENCODE als Index!)
@@ -287,6 +297,18 @@ class C64ROMFontRenderer:
         
         # Kopiere aus Font-Surface
         region = font_surface.crop((src_x, src_y, src_x + self.char_width, src_y + self.char_height))
+        
+        # Wenn globaler Hintergrund NICHT schwarz ist:
+        # Ersetze schwarze Pixel (0,0,0) durch Hintergrundfarbe
+        if global_bg_idx != 0:
+            bg_color = self.palette[global_bg_idx]
+            region = region.copy()  # Muss kopieren um Original nicht zu ändern
+            pixels = region.load()
+            for py in range(self.char_height):
+                for px in range(self.char_width):
+                    if pixels[px, py] == (0, 0, 0):
+                        pixels[px, py] = bg_color
+        
         dest.paste(region, (dest_x, dest_y))
     
     def render_with_cursor(self, cursor_char='█'):

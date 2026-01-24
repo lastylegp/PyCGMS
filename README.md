@@ -2,7 +2,7 @@
 
 A modern Python-based terminal emulator for connecting to Commodore 64 BBS systems via Telnet. Features authentic PETSCII rendering using original C64 ROM fonts, file transfer support, and a full-featured macro/hotkey editor.
 
-**Version:** 1.0  
+**Version:** 1.1  
 **Author:** lA-sTYLe/Quantum (2026)
 
 ## Features
@@ -81,6 +81,7 @@ python run_terminal.py
 | **F1** | Upload file(s) |
 | **F2** | Send text file (SEQ or Text)|
 | **F3** | Download file |
+| **F4** | Scrollback Buffer |
 | **F5** | Settings dialog |
 | **F7** | Dial/Connect to BBS |
 | **F9** | Send auto-login |
@@ -99,6 +100,9 @@ The terminal maps your keyboard to C64 PETSCII codes:
 
 | PC Key | C64 Function |
 |--------|--------------|
+|CTRL+G Command to Play Bell sound like CCGMS/Novaterm|
+|CTRL+B+Numberkey to Change Terminal Background Colour line CCGMS/Novaterm|
+|CTRL+N set BG Colour back to black| 
 | Ctrl+1-8 | Colors (Black, White, Red, Cyan, Purple, Green, Blue, Yellow) |
 | Ctrl+9 | RVS ON (Reverse video) |
 | Ctrl+0 | RVS OFF |
@@ -127,10 +131,11 @@ Hotkeys are stored in `hotkeys.seq` - a binary file with PETSCII sequences separ
 ## File Transfer
 
 ### Uploading Files
-1. Press **F1** or use menu Transfer → Upload
-2. Select file(s) - multiple selection supported
-3. Single file uses XModem-1K, multiple files use YModem Batch
-4. Progress shows: `File X/Y: filename (bytes/total bytes)`
+1. Initiate download on BBS
+2. Press **F1** or use menu Transfer → Upload
+3. Select file(s) - multiple selection supported
+4. Single file uses XModem-1K, multiple files use YModem Batch
+5. Progress shows: `File X/Y: filename (bytes/total bytes)`
 
 ### Downloading Files
 1. Initiate download on BBS
@@ -272,6 +277,10 @@ terminal/
 - Custom High-speed streaming protocol 
 - Automatic Filename transfer , multifile
 
+**Turbomodem**
+- Custom High-speed multi 8K Window tech using protocol 
+- Automatic Filename transfer , multifile
+
 ## Known Limitations
 
 - Punter protocol is experimental
@@ -302,6 +311,10 @@ This software is provided as-is for connecting to Commodore 64 BBS systems. The 
 - Phonebook with auto-login
 - Transfer progress with file/byte counters
 
+### v1.1 (24.01.2026)
+
+- see Changelog.md
+
 ## Credits
 
 - C64 Font rendering based on original Commodore 64 character ROM
@@ -314,7 +327,7 @@ This software is provided as-is for connecting to Commodore 64 BBS systems. The 
 
 **Tested on the following Boards:**
 
-- The Hiden
+- The Hidden
 - Raveolution
 - Rapidfire
 - Friabad

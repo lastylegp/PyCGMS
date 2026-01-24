@@ -341,14 +341,15 @@ class ScrollbackBuffer:
     """
     Scrollback Buffer für Terminal-History
     Speichert alle empfangenen und gesendeten Zeichen
+    UNLIMITED - kein Limit!
     """
     
-    def __init__(self, max_lines=10000):
-        self.max_lines = max_lines
+    def __init__(self, max_lines=0):
+        self.max_lines = 0  # 0 = UNLIMITED
         self.lines = []
         self.current_line = []
         self.raw_bytes = bytearray()  # RAW PETSCII bytes
-        self.max_raw_bytes = 0  # 0 = UNLIMITED!
+        self.max_raw_bytes = 0  # 0 = UNLIMITED
     
     def add_char(self, char):
         """Fügt ein Zeichen zum Buffer hinzu"""
@@ -356,8 +357,8 @@ class ScrollbackBuffer:
             self.lines.append(''.join(self.current_line))
             self.current_line = []
             
-            # Limitiere Buffer-Größe
-            if len(self.lines) > self.max_lines:
+            # Limitiere Buffer-Größe nur wenn max_lines > 0
+            if self.max_lines > 0 and len(self.lines) > self.max_lines:
                 self.lines.pop(0)
         else:
             self.current_line.append(char)
@@ -370,9 +371,7 @@ class ScrollbackBuffer:
         elif isinstance(data, int):
             self.raw_bytes.append(data)
         
-        # KEIN Limit mehr - unbegrenzt!
-        # if len(self.raw_bytes) > self.max_raw_bytes:
-        #     self.raw_bytes = self.raw_bytes[-self.max_raw_bytes:]
+        # KEIN Limit - unbegrenzt!
         
         # Text-Representation für get_all_text()
         for byte in data:
@@ -414,8 +413,15 @@ class ScrollbackBuffer:
         return len(self.lines)
 
 
+
 class ScrollbackViewer(tk.Toplevel):
-    """Viewer für Scrollback Buffer mit PETSCII Rendering"""
+    """Viewer für Scrollback Buffer mit PETSCII Rendering
+    
+    - 2500 Zeilen pro Page
+    - Virtuelles Scrolling (rendert nur sichtbare Zeilen)
+    - Auto-Page-Wechsel am Ende der Page
+    - Füllt das gesamte Fenster
+    """
     
     def __init__(self, parent, scrollback_buffer, terminal_width=80):
         super().__init__(parent)
@@ -424,18 +430,26 @@ class ScrollbackViewer(tk.Toplevel):
         self.buffer = scrollback_buffer
         self.terminal_width = terminal_width
         
+        # Page-System: 2500 Zeilen pro Page
+        self.lines_per_page = 2500
+        self.current_page = 0
+        self.total_pages = 1
+        
+        # Viewport wird dynamisch berechnet
+        self.scroll_offset = 0
+        
         # Import für PIL
         from PIL import ImageTk
-        self.ImageTk = ImageTk  # Speichere für später
+        self.ImageTk = ImageTk
         
         # PETSCII Screen + Parser für Scrollback
         from petscii_parser import PETSCIIScreenBuffer, PETSCIIParser
-        from c64_rom_renderer import C64ROMFontRenderer  # RICHTIG!
+        from c64_rom_renderer import C64ROMFontRenderer
         
-        # Nutze Terminal Width!
+        # Screen für Parsing (wächst unbegrenzt)
         self.screen = PETSCIIScreenBuffer(width=terminal_width, height=50)
-        self.screen.unlimited_growth = True  # ← Wächst unbegrenzt!
-        self.parser = PETSCIIParser(self.screen, scrollback_mode=True)  # ← WICHTIG!
+        self.screen.unlimited_growth = True
+        self.parser = PETSCIIParser(self.screen, scrollback_mode=True)
         self.renderer = C64ROMFontRenderer(
             self.screen,
             font_upper_path="upper.bmp",
@@ -453,113 +467,268 @@ class ScrollbackViewer(tk.Toplevel):
         ttk.Button(toolbar, text="Save RAW", command=self.save_raw).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Save Text", command=self.save_text).pack(side=tk.LEFT, padx=2)
         
-        line_count = self.buffer.get_line_count()
-        self.status_var = tk.StringVar(value=f"{line_count} lines")
+        # Page-Navigation
+        nav_frame = ttk.Frame(toolbar)
+        nav_frame.pack(side=tk.RIGHT, padx=10)
+        
+        ttk.Button(nav_frame, text="⏮", width=3, command=self.page_first).pack(side=tk.LEFT)
+        ttk.Button(nav_frame, text="◀", width=3, command=self.page_prev).pack(side=tk.LEFT)
+        
+        self.page_var = tk.StringVar(value="Page 1/1")
+        ttk.Label(nav_frame, textvariable=self.page_var, width=14).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(nav_frame, text="▶", width=3, command=self.page_next).pack(side=tk.LEFT)
+        ttk.Button(nav_frame, text="⏭", width=3, command=self.page_last).pack(side=tk.LEFT)
+        
+        # Status
+        self.status_var = tk.StringVar(value="0 lines")
         ttk.Label(toolbar, textvariable=self.status_var).pack(side=tk.RIGHT, padx=10)
         
-        # Canvas für PETSCII Rendering
-        canvas_frame = ttk.Frame(self)
-        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Zeilen-Anzeige (welche Zeilen gerade sichtbar)
+        self.lines_var = tk.StringVar(value="Lines: -")
+        ttk.Label(toolbar, textvariable=self.lines_var).pack(side=tk.RIGHT, padx=10)
+        
+        # Main Frame mit Canvas und Scrollbar
+        main_frame = ttk.Frame(self)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Scrollbar
-        scrollbar = ttk.Scrollbar(canvas_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.scrollbar = ttk.Scrollbar(main_frame)
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Canvas
-        self.canvas = tk.Canvas(canvas_frame, bg='black',
-                               yscrollcommand=scrollbar.set)
+        self.canvas = tk.Canvas(main_frame, bg='black')
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.canvas.yview)
         
-        # Scrollrad-Support (Maus-Wheel)
-        self.canvas.bind("<MouseWheel>", self._on_mousewheel)  # Windows/Mac
-        self.canvas.bind("<Button-4>", self._on_mousewheel)    # Linux scroll up
-        self.canvas.bind("<Button-5>", self._on_mousewheel)    # Linux scroll down
+        # Scrollbar Command
+        self.scrollbar.config(command=self._on_scrollbar)
         
-        # Initial befüllen
-        self.refresh()
+        # Mausrad
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<Button-4>", self._on_mousewheel)
+        self.canvas.bind("<Button-5>", self._on_mousewheel)
+        
+        # Resize Event
+        self.canvas.bind("<Configure>", self._on_resize)
+        
+        # Initial befüllen (nach kurzer Verzögerung damit Canvas-Größe bekannt)
+        self.after(100, self.refresh)
         
         self.transient(parent)
     
+    def _get_viewport_lines(self):
+        """Berechnet wie viele Zeilen ins Fenster passen"""
+        canvas_height = self.canvas.winfo_height()
+        if canvas_height < 10:
+            canvas_height = 600  # Default
+        char_height = 8 * self.renderer.zoom
+        return max(10, canvas_height // char_height)
+    
+    def _get_page_lines(self):
+        """Anzahl Zeilen in aktueller Page"""
+        start = self.current_page * self.lines_per_page
+        end = min(start + self.lines_per_page, self.screen.height)
+        return max(0, end - start)
+    
+    def _on_resize(self, event):
+        """Fenster wurde vergrößert/verkleinert"""
+        self.render_viewport()
+    
+    def _on_scrollbar(self, *args):
+        """Scrollbar Kommando"""
+        page_lines = self._get_page_lines()
+        viewport_lines = self._get_viewport_lines()
+        max_scroll = max(0, page_lines - viewport_lines)
+        
+        if args[0] == 'moveto':
+            fraction = float(args[1])
+            self.scroll_offset = int(fraction * max_scroll)
+        elif args[0] == 'scroll':
+            amount = int(args[1])
+            if args[2] == 'units':
+                self.scroll_offset += amount
+            elif args[2] == 'pages':
+                self.scroll_offset += amount * viewport_lines
+        
+        self._handle_scroll_bounds()
+        self.render_viewport()
+    
+    def _on_mousewheel(self, event):
+        """Mausrad Scrolling"""
+        if event.num == 4 or event.delta > 0:
+            self.scroll_offset -= 3
+        elif event.num == 5 or event.delta < 0:
+            self.scroll_offset += 3
+        
+        self._handle_scroll_bounds()
+        self.render_viewport()
+    
+    def _handle_scroll_bounds(self):
+        """Prüft Grenzen und wechselt Page bei Bedarf"""
+        page_lines = self._get_page_lines()
+        viewport_lines = self._get_viewport_lines()
+        max_scroll = max(0, page_lines - viewport_lines)
+        
+        # Am Ende der Page -> nächste Page
+        if self.scroll_offset > max_scroll:
+            if self.current_page < self.total_pages - 1:
+                self.current_page += 1
+                self.scroll_offset = 0
+                self._update_page_var()
+            else:
+                self.scroll_offset = max_scroll
+        
+        # Vor dem Anfang -> vorherige Page
+        if self.scroll_offset < 0:
+            if self.current_page > 0:
+                self.current_page -= 1
+                prev_lines = self._get_page_lines()
+                self.scroll_offset = max(0, prev_lines - viewport_lines)
+                self._update_page_var()
+            else:
+                self.scroll_offset = 0
+    
+    def _update_page_var(self):
+        """Page-Anzeige aktualisieren"""
+        self.page_var.set(f"Page {self.current_page + 1}/{self.total_pages}")
+    
+    def _update_scrollbar(self):
+        """Scrollbar Position aktualisieren"""
+        page_lines = self._get_page_lines()
+        viewport_lines = self._get_viewport_lines()
+        if page_lines <= viewport_lines:
+            self.scrollbar.set(0, 1)
+        else:
+            start = self.scroll_offset / page_lines
+            end = (self.scroll_offset + viewport_lines) / page_lines
+            self.scrollbar.set(start, min(1, end))
+    
+    def page_first(self):
+        """Erste Page, Anfang"""
+        self.current_page = 0
+        self.scroll_offset = 0
+        self._update_page_var()
+        self.render_viewport()
+    
+    def page_prev(self):
+        """Vorherige Page"""
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.scroll_offset = 0
+            self._update_page_var()
+            self.render_viewport()
+    
+    def page_next(self):
+        """Nächste Page"""
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self.scroll_offset = 0
+            self._update_page_var()
+            self.render_viewport()
+    
+    def page_last(self):
+        """Letzte Page, Ende"""
+        self.current_page = max(0, self.total_pages - 1)
+        page_lines = self._get_page_lines()
+        viewport_lines = self._get_viewport_lines()
+        self.scroll_offset = max(0, page_lines - viewport_lines)
+        self._update_page_var()
+        self.render_viewport()
+    
     def refresh(self):
-        """Aktualisiert die Anzeige mit PETSCII Rendering"""
-        # Parse alle Scrollback-Bytes
+        """Buffer neu parsen und anzeigen"""
         all_bytes = self.buffer.get_all_bytes()
         
         print(f"Scrollback Refresh: {len(all_bytes)} bytes")
-        print(f"First 100 bytes: {all_bytes[:100]}")
         
-        # Clear screen
+        # Reset screen
         self.screen.clear_screen()
+        self.screen.cursor_x = 0
+        self.screen.cursor_y = 0
         
         # Parse
         try:
             self.parser.parse_bytes(all_bytes)
-            print(f"Parse OK - Cursor: ({self.screen.cursor_x}, {self.screen.cursor_y})")
-            print(f"Screen size: {self.screen.width}x{self.screen.height} (dynamisch gewachsen!)")
-            
-            # Zeige ein paar Zeilen vom Screen und zähle non-empty
-            non_empty_lines = 0
-            for y in range(self.screen.height):
-                # self.screen.buffer[y][x] ist PETSCIIScreenCell mit .char Attribut
-                line_chars = []
-                for x in range(min(40, self.screen.width)):
-                    cell = self.screen.buffer[y][x]
-                    # cell.char kann int oder str sein
-                    char_val = cell.char if isinstance(cell.char, int) else ord(cell.char) if cell.char else 32
-                    
-                    if 32 <= char_val < 127:
-                        line_chars.append(chr(char_val))
-                    else:
-                        line_chars.append('.')
-                line_text = ''.join(line_chars)
-                
-                if line_text.strip():
-                    if y < 10:  # Zeige erste 10
-                        print(f"Line {y}: {line_text}")
-                    non_empty_lines += 1
-            
-            print(f"Non-empty lines total: {non_empty_lines} of {self.screen.height}")
-            
+            print(f"Parse OK - {self.screen.height} lines")
         except Exception as e:
             print(f"Parse Error: {e}")
             import traceback
             traceback.print_exc()
         
-        # Render (gibt PIL.Image zurück)
-        try:
-            rendered_image = self.renderer.render()
-            print(f"Rendered: {rendered_image.width}x{rendered_image.height}")
-        except Exception as e:
-            print(f"Render Error: {e}")
-            import traceback
-            traceback.print_exc()
-            # Erstelle leeres Bild als Fallback
-            from PIL import Image
-            rendered_image = Image.new('RGB', (1280, 1000), color='black')
+        # Berechne Pages
+        self.total_pages = max(1, (self.screen.height + self.lines_per_page - 1) // self.lines_per_page)
         
-        # Zeige auf Canvas
-        self.photo = self.ImageTk.PhotoImage(rendered_image)
+        # Gehe zur letzten Page, ans Ende
+        self.current_page = max(0, self.total_pages - 1)
+        page_lines = self._get_page_lines()
+        viewport_lines = self._get_viewport_lines()
+        self.scroll_offset = max(0, page_lines - viewport_lines)
         
+        # Status
+        self.status_var.set(f"{self.screen.height} lines, {len(all_bytes)} bytes")
+        self._update_page_var()
+        
+        self.render_viewport()
+    
+    def render_viewport(self):
+        """Rendert den sichtbaren Bereich - füllt das ganze Fenster"""
+        from PIL import Image
+        
+        # Canvas-Größe holen
+        canvas_width = self.canvas.winfo_width()
+        canvas_height = self.canvas.winfo_height()
+        
+        if canvas_width < 10 or canvas_height < 10:
+            return  # Canvas noch nicht initialisiert
+        
+        # Viewport berechnen
+        char_width = 8 * self.renderer.zoom
+        char_height = 8 * self.renderer.zoom
+        viewport_lines = canvas_height // char_height
+        
+        # Absolute Zeilen-Position
+        page_start = self.current_page * self.lines_per_page
+        abs_start = page_start + self.scroll_offset
+        abs_end = min(abs_start + viewport_lines, self.screen.height)
+        
+        # Bild in Canvas-Größe erstellen
+        img_width = self.screen.width * char_width
+        img_height = canvas_height
+        
+        bg_idx = self.screen.screen_bg if hasattr(self.screen, 'screen_bg') else 0
+        bg_color = self.renderer.palette[bg_idx]
+        
+        img = Image.new('RGB', (img_width, img_height), bg_color)
+        
+        # Font
+        current_font = self.renderer.font_lower if self.screen.charset_mode == 'lower' else self.renderer.font_upper
+        
+        # Rendere sichtbare Zeilen
+        for y in range(abs_start, abs_end):
+            render_y = y - abs_start
+            for x in range(self.screen.width):
+                if y < len(self.screen.buffer):
+                    cell = self.screen.buffer[y][x]
+                    self.renderer._render_cell(img, current_font, x, render_y, cell, bg_idx)
+        
+        # Anzeigen
+        self.photo = self.ImageTk.PhotoImage(img)
         self.canvas.delete('all')
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
         
-        # Update scrollregion
-        self.canvas.config(scrollregion=(0, 0, rendered_image.width, rendered_image.height))
-        self.canvas.config(scrollregion=(0, 0, rendered_image.width, rendered_image.height))
+        # Zeilen-Anzeige aktualisieren
+        self.lines_var.set(f"Lines {abs_start + 1}-{abs_end} / {self.screen.height}")
         
-        # Status
-        line_count = self.buffer.get_line_count()
-        self.status_var.set(f"{line_count} lines, {len(all_bytes)} bytes")
+        self._update_scrollbar()
     
     def clear_buffer(self):
-        """Löscht den Buffer"""
+        """Buffer löschen"""
         if messagebox.askyesno("Confirm", "Scrollback Buffer löschen?", parent=self):
             self.buffer.clear()
             self.refresh()
     
     def load_raw(self):
-        """Lädt RAW PETSCII Datei (.seq) in den Buffer"""
+        """RAW PETSCII Datei laden"""
         filename = filedialog.askopenfilename(
             parent=self,
             title="Load RAW PETSCII File",
@@ -570,50 +739,31 @@ class ScrollbackViewer(tk.Toplevel):
                 with open(filename, 'rb') as f:
                     raw_data = f.read()
                 
-                # Versuche Metadata zu lesen
                 metadata = None
                 petscii_data = raw_data
                 
                 if len(raw_data) >= 2:
-                    # Lese Header-Länge
                     header_len = int.from_bytes(raw_data[0:2], byteorder='big')
                     
-                    # Validiere Header-Länge (max 1KB)
                     if 0 < header_len < 1024 and len(raw_data) >= (2 + header_len):
                         try:
-                            # Lese Header
                             import json
                             header_bytes = raw_data[2:2+header_len]
                             metadata = json.loads(header_bytes.decode('utf-8'))
-                            
-                            # Extrahiere PETSCII Data (nach Header)
                             petscii_data = raw_data[2+header_len:]
                             
-                            print(f"Loaded metadata: {metadata}")
-                            
-                            # Passe Screen Width an
                             if 'width' in metadata:
-                                old_width = self.screen.width
                                 new_width = metadata['width']
-                                
-                                if new_width != old_width:
-                                    # Erstelle neuen Screen mit korrekter Width
+                                if new_width != self.screen.width:
                                     from petscii_parser import PETSCIIScreenBuffer, PETSCIIParser
                                     self.screen = PETSCIIScreenBuffer(width=new_width, height=50)
                                     self.screen.unlimited_growth = True
                                     self.parser = PETSCIIParser(self.screen, scrollback_mode=True)
-                                    
-                                    print(f"Screen width changed: {old_width} → {new_width}")
-                        
                         except (json.JSONDecodeError, UnicodeDecodeError):
-                            # Kein valider Header - nutze komplette Datei
                             petscii_data = raw_data
                             metadata = None
                 
-                # Füge zu Buffer hinzu (ersetzt nicht, fügt hinzu!)
                 self.buffer.add_bytes(petscii_data)
-                
-                # Refresh display
                 self.refresh()
                 
                 info_msg = f"Loaded {len(petscii_data)} bytes from {filename}"
@@ -627,7 +777,7 @@ class ScrollbackViewer(tk.Toplevel):
                 traceback.print_exc()
     
     def save_raw(self):
-        """Speichert Buffer als RAW PETSCII mit Metadata"""
+        """Buffer als RAW speichern"""
         filename = filedialog.asksaveasfilename(
             parent=self,
             title="Scrollback als RAW speichern",
@@ -638,7 +788,6 @@ class ScrollbackViewer(tk.Toplevel):
             try:
                 all_bytes = self.buffer.get_all_bytes()
                 
-                # Erstelle Metadata Header (JSON in ersten Bytes)
                 import json
                 metadata = {
                     "width": self.screen.width,
@@ -646,16 +795,11 @@ class ScrollbackViewer(tk.Toplevel):
                     "version": "3.3"
                 }
                 header = json.dumps(metadata).encode('utf-8')
-                
-                # Format: [Header-Length (2 bytes)][Header][Data]
                 header_len = len(header)
                 
                 with open(filename, 'wb') as f:
-                    # Schreibe Header-Länge (Big Endian)
                     f.write(header_len.to_bytes(2, byteorder='big'))
-                    # Schreibe Header
                     f.write(header)
-                    # Schreibe PETSCII Data
                     f.write(all_bytes)
                 
                 messagebox.showinfo("Success", 
@@ -667,7 +811,7 @@ class ScrollbackViewer(tk.Toplevel):
                 messagebox.showerror("Error", f"Fehler: {str(e)}", parent=self)
     
     def save_text(self):
-        """Speichert Buffer als Text"""
+        """Buffer als Text speichern"""
         filename = filedialog.asksaveasfilename(
             parent=self,
             title="Scrollback als Text speichern",
@@ -681,14 +825,3 @@ class ScrollbackViewer(tk.Toplevel):
                 messagebox.showinfo("Success", f"Text gespeichert: {filename}", parent=self)
             except Exception as e:
                 messagebox.showerror("Error", f"Fehler: {str(e)}", parent=self)
-    
-    def _on_mousewheel(self, event):
-        """Handle Maus-Wheel Scrolling"""
-        # Windows/Mac: event.delta
-        # Linux: event.num (4=up, 5=down)
-        if event.num == 4 or event.delta > 0:
-            # Scroll up
-            self.canvas.yview_scroll(-1, "units")
-        elif event.num == 5 or event.delta < 0:
-            # Scroll down
-            self.canvas.yview_scroll(1, "units")

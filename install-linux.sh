@@ -102,23 +102,24 @@ echo ""
 echo -e "${BLUE}[3/6] Installing required Python packages...${NC}"
 echo "Installing Pillow..."
 
-$PIP_CMD install --user pillow
+$PIP_CMD install --user pillow xmodem
 
 if [ $? -ne 0 ]; then
     echo -e "${YELLOW}WARNING: User install failed, trying with sudo...${NC}"
-    sudo $PIP_CMD install pillow
+    sudo $PIP_CMD install pillow xmodem
     
     if [ $? -ne 0 ]; then
         echo -e "${RED}ERROR: Package installation failed!${NC}"
         echo ""
         echo "Try manually:"
-        echo "  $PIP_CMD install --user pillow"
+        echo "  $PIP_CMD install --user pillow xmodem"
         echo ""
         exit 1
     fi
 fi
 
 echo -e "${GREEN}Pillow installed successfully!${NC}"
+echo -e "${GREEN}xmodem installed successfully!${NC}"
 echo ""
 
 # [4/6] Check Tkinter

@@ -58,20 +58,21 @@ REM Install pip packages
 echo [2/5] Installing required Python packages...
 echo Installing Pillow...
 python -m pip install --upgrade pip >nul 2>&1
-python -m pip install pillow
+python -m pip install pillow xmodem
 
 if errorlevel 1 (
     echo.
     echo WARNING: Package installation failed!
     echo You may need to run this script as Administrator.
     echo.
-    echo Try running: python -m pip install pillow
+    echo Try running: python -m pip install pillow xmodem
     echo.
     pause
     exit /b 1
 )
 
 echo Pillow installed successfully!
+echo xmodem installed successfully!
 echo.
 
 REM Check if font exists

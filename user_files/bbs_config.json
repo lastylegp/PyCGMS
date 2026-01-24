@@ -1,0 +1,26 @@
+{
+  "bbs_list": [
+    {
+      "name": "The Hidden",
+      "description": "",
+      "host": "the-hidden.hopto.org",
+      "port": 64128,
+      "username": "",
+      "password": "",
+      "send_delay": 1000,
+      "protocol": "XModem-1K",
+      "transfer_speed": "normal"
+    },
+    {
+      "name": "Raveolution",
+      "description": "",
+      "host": "raveolution.hopto.org",
+      "port": 64128,
+      "username": "",
+      "password": "",
+      "send_delay": 1000,
+      "protocol": "XModem-1K",
+      "transfer_speed": "normal"
+    }
+  ]
+}

@@ -1,7 +1,3 @@
-"""
-PETSCII BBS Terminal v3.3 - KOMPLETT
-Alle Features eingebaut: Upload, Download, Settings, Scrollback, Resizable
-"""
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext
@@ -28,12 +24,12 @@ def debug_print(*args, **kwargs):
 
 
 class TransferProgressDialog(tk.Toplevel):
-    """Transfer Progress mit Bytes und Geschwindigkeit"""
+    """Transfer Progress mit LIVE Bytes, Geschwindigkeit und Dateiname"""
     
     def __init__(self, parent, title, is_upload=True, show_file_list=False, file_list=None, punter_debug=False, is_punter=False, bbs_connection=None):
         super().__init__(parent)
         self.title(title)
-        self.resizable(True, True)  # Resizable für Debug-Modus
+        self.resizable(True, True)
         
         self.cancelled = False
         self.start_time = time.time()
@@ -41,54 +37,82 @@ class TransferProgressDialog(tk.Toplevel):
         self.last_time = time.time()
         self.show_file_list = show_file_list
         self.completed_files = []
-        self.file_status = {}  # filename -> status ('waiting', 'active', 'done', 'error')
+        self.file_status = {}
         self.total_files = 0
         self.completed_count = 0
         self.punter_debug = punter_debug
-        self.is_punter = is_punter or punter_debug  # Punter wenn debug oder explizit
-        self.file_transfer = None  # Referenz für manuelle Sends
-        self.bbs_connection = bbs_connection  # Direkte BBS-Connection für CTRL+X
+        self.is_punter = is_punter or punter_debug
+        self.file_transfer = None
+        self.bbs_connection = bbs_connection
         
-        # Throttling für Progress Updates (wichtig für TurboModem!)
+        # Für Geschwindigkeitsberechnung
+        self.speed_samples = []  # Liste von (time, bytes) für gleitenden Durchschnitt
+        self.current_file_start_bytes = 0
+        self.current_filename = ""
+        self.files_completed = 0
+        self.total_files_count = 0
+        
+        # Throttling
         self.last_update_time = 0
-        self.min_update_interval = 0.05  # Max 20 Updates/Sekunde
+        self.min_update_interval = 0.05
         self.pending_update = None
         
-        # Header
-        header_text = "📤 Upload" if is_upload else "📥 Download"
-        ttk.Label(self, text=header_text, font=('Arial', 14, 'bold')).pack(pady=10)
+        # ===== UI AUFBAU =====
+        main_frame = ttk.Frame(self, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Files Counter (für Multi-File)
-        self.files_var = tk.StringVar(value="")
-        self.files_label = ttk.Label(self, textvariable=self.files_var, font=('Arial', 11))
-        self.files_label.pack(pady=2)
+        # Header mit Typ
+        header_text = "📤 UPLOAD" if is_upload else "📥 DOWNLOAD"
+        ttk.Label(main_frame, text=header_text, font=('Arial', 16, 'bold')).pack(pady=(0, 10))
         
-        # Status
-        self.status_var = tk.StringVar(value="Initializing...")
-        ttk.Label(self, textvariable=self.status_var).pack(pady=5)
+        # === AKTUELLES FILE (groß und prominent) ===
+        file_frame = ttk.LabelFrame(main_frame, text="Current File", padding=10)
+        file_frame.pack(fill=tk.X, pady=5)
         
-        # Progress Bar
-        self.progress = ttk.Progressbar(self, mode='determinate', length=400)
-        self.progress.pack(pady=10)
+        self.current_file_var = tk.StringVar(value="Waiting...")
+        self.current_file_label = ttk.Label(file_frame, textvariable=self.current_file_var, 
+                                            font=('Consolas', 12, 'bold'), foreground='blue')
+        self.current_file_label.pack(anchor=tk.W)
         
-        # Stats Frame
-        stats_frame = ttk.Frame(self)
-        stats_frame.pack(fill=tk.X, padx=20, pady=10)
+        # File Progress Bar
+        self.file_progress = ttk.Progressbar(file_frame, mode='determinate', length=450)
+        self.file_progress.pack(fill=tk.X, pady=(5, 0))
         
-        self.bytes_var = tk.StringVar(value="0 / 0 bytes")
-        self.speed_var = tk.StringVar(value="0 bytes/s")
+        # File Stats (Bytes + Prozent)
+        file_stats_frame = ttk.Frame(file_frame)
+        file_stats_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        self.file_bytes_var = tk.StringVar(value="0 / 0 bytes")
+        self.file_percent_var = tk.StringVar(value="0%")
+        ttk.Label(file_stats_frame, textvariable=self.file_bytes_var, font=('Arial', 10)).pack(side=tk.LEFT)
+        ttk.Label(file_stats_frame, textvariable=self.file_percent_var, font=('Arial', 10, 'bold')).pack(side=tk.RIGHT)
+        
+        # === TRANSFER STATS ===
+        stats_frame = ttk.LabelFrame(main_frame, text="Transfer Statistics", padding=10)
+        stats_frame.pack(fill=tk.X, pady=5)
+        
+        # Grid für Stats
+        self.speed_var = tk.StringVar(value="Speed: -- KB/s")
         self.eta_var = tk.StringVar(value="ETA: --:--")
+        self.elapsed_var = tk.StringVar(value="Elapsed: 0:00")
+        self.total_bytes_var = tk.StringVar(value="Total: 0 bytes")
         
-        ttk.Label(stats_frame, textvariable=self.bytes_var).grid(row=0, column=0, sticky=tk.W)
-        ttk.Label(stats_frame, textvariable=self.speed_var).grid(row=1, column=0, sticky=tk.W)
-        ttk.Label(stats_frame, textvariable=self.eta_var).grid(row=2, column=0, sticky=tk.W)
+        ttk.Label(stats_frame, textvariable=self.speed_var, font=('Arial', 11, 'bold'), 
+                  foreground='green').grid(row=0, column=0, sticky=tk.W, padx=5)
+        ttk.Label(stats_frame, textvariable=self.eta_var, font=('Arial', 10)).grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Label(stats_frame, textvariable=self.elapsed_var, font=('Arial', 10)).grid(row=1, column=0, sticky=tk.W, padx=5)
+        ttk.Label(stats_frame, textvariable=self.total_bytes_var, font=('Arial', 10)).grid(row=1, column=1, sticky=tk.W, padx=5)
         
-        # Dateiliste für Multi-File (optional)
+        # === MULTI-FILE COUNTER ===
+        self.files_var = tk.StringVar(value="")
+        self.files_label = ttk.Label(main_frame, textvariable=self.files_var, font=('Arial', 11))
+        self.files_label.pack(pady=5)
+        
+        # === FILE LIST (wenn Multi-File) ===
         if show_file_list:
-            list_frame = ttk.LabelFrame(self, text="Files", padding=5)
-            list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=5)
+            list_frame = ttk.LabelFrame(main_frame, text="Files", padding=5)
+            list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
             
-            # Scrollbare Listbox
             self.file_listbox = tk.Listbox(list_frame, height=6, font=('Consolas', 9))
             scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.file_listbox.yview)
             self.file_listbox.configure(yscrollcommand=scrollbar.set)
@@ -96,7 +120,6 @@ class TransferProgressDialog(tk.Toplevel):
             self.file_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
             
-            # Initialisiere File-Liste wenn übergeben
             if file_list:
                 self.set_file_list(file_list)
         
@@ -114,15 +137,15 @@ class TransferProgressDialog(tk.Toplevel):
         # Cancel Button
         ttk.Button(self, text="Cancel", command=self.cancel).pack(pady=10)
         
-        # Größe je nach Modus
+        # Größe je nach Modus - größer für bessere Lesbarkeit
         if punter_debug:
-            self.geometry("700x650")
+            self.geometry("700x700")
         elif self.is_punter:
-            self.geometry("500x400")  # Etwas größer für Waiting + CTRL+X
+            self.geometry("520x500")
         elif show_file_list:
-            self.geometry("500x400")
+            self.geometry("520x550")
         else:
-            self.geometry("500x320")  # 100px höher für bessere Lesbarkeit
+            self.geometry("520x380")  # Größer für alle Statistiken
         
         self.transient(parent)
         self.grab_set()
@@ -323,12 +346,17 @@ class TransferProgressDialog(tk.Toplevel):
     
     def set_file_list(self, files):
         """Setzt die initiale File-Liste (für Multi-File Transfers)"""
+        self.total_files = len(files)
+        self.total_files_count = len(files)  # Für update_progress
+        self.completed_count = 0
+        self.files_completed = 0  # Für update_progress
+        self.file_status = {}
+        
+        # Setze Files Counter auch wenn keine Listbox
+        self._update_files_counter()
+        
         if not self.show_file_list or not hasattr(self, 'file_listbox'):
             return
-        
-        self.total_files = len(files)
-        self.completed_count = 0
-        self.file_status = {}
         
         self.file_listbox.delete(0, tk.END)
         
@@ -338,8 +366,6 @@ class TransferProgressDialog(tk.Toplevel):
             self.file_status[filename] = 'waiting'
             # Format: "⏳ FILENAME.PRG"
             self.file_listbox.insert(tk.END, f"⏳ {filename}")
-        
-        self._update_files_counter()
     
     def _update_files_counter(self):
         """Aktualisiert den Files x/y Counter"""
@@ -450,78 +476,107 @@ class TransferProgressDialog(tk.Toplevel):
             
             self.after(0, do_add)
     
-    def update_progress(self, bytes_done, total_bytes, status):
-        """Update Progress (mit Throttling für TurboModem)"""
-        # Throttling: Nur alle min_update_interval Sekunden updaten
+    def update_progress(self, bytes_done, total_bytes, status, filename=None):
+        """Update Progress mit LIVE Statistiken (mit Throttling für TurboModem)"""
         current_time = time.time()
         time_since_last = current_time - self.last_update_time
         
         # Immer beim ersten Update oder wenn genug Zeit vergangen ist
         if self.last_update_time == 0 or time_since_last >= self.min_update_interval:
-            self._do_update(bytes_done, total_bytes, status)
+            self._do_update(bytes_done, total_bytes, status, filename)
             self.last_update_time = current_time
             
-            # Cancel pending update wenn vorhanden
             if self.pending_update:
                 self.after_cancel(self.pending_update)
                 self.pending_update = None
         else:
-            # Schedule Update für später (nur wenn noch keiner pending ist)
             if not self.pending_update:
                 delay_ms = int((self.min_update_interval - time_since_last) * 1000)
                 self.pending_update = self.after(delay_ms, 
-                    lambda: self._do_update(bytes_done, total_bytes, status))
+                    lambda: self._do_update(bytes_done, total_bytes, status, filename))
     
-    def _do_update(self, bytes_done, total_bytes, status):
-        """Actual update logic"""
-        self.status_var.set(status)
-        
-        # Geschwindigkeit berechnen (IMMER, egal ob total_bytes bekannt)
-        current_time = time.time()
-        time_diff = current_time - self.last_time
-        
-        if time_diff >= 0.2:  # Update alle 0.2s (responsiver)
-            bytes_diff = bytes_done - self.last_bytes
+    def _do_update(self, bytes_done, total_bytes, status, filename=None):
+        """Actual update logic mit allen Live-Statistiken"""
+        try:
+            current_time = time.time()
             
-            # Bei neuem File (bytes_done < last_bytes) -> Reset
-            if bytes_diff < 0:
-                bytes_diff = bytes_done  # Nur die neuen Bytes zählen
-                self.last_bytes = 0
+            # === DATEINAME UPDATE ===
+            if filename and filename != self.current_filename:
+                self.current_filename = filename
+                self.current_file_var.set(filename)
+                self.current_file_start_bytes = self.last_bytes
+                self.current_file_label.configure(foreground='blue')
+            elif not filename and status:
+                # Wenn kein filename, versuche aus status zu extrahieren
+                # TurboModem Status: "Sent 123 KB"
+                if not self.current_filename or self.current_filename == "Waiting...":
+                    self.current_file_var.set(status)
             
-            speed = bytes_diff / time_diff if time_diff > 0 else 0
+            # === GESCHWINDIGKEIT (gleitender Durchschnitt) ===
+            time_diff = current_time - self.last_time
+            if time_diff >= 0.1:
+                bytes_diff = bytes_done - self.last_bytes
+                
+                if bytes_diff < 0:
+                    bytes_diff = bytes_done
+                    self.last_bytes = 0
+                    self.speed_samples = []
+                
+                if time_diff > 0:
+                    instant_speed = bytes_diff / time_diff
+                    self.speed_samples.append((current_time, instant_speed))
+                    self.speed_samples = [(t, s) for t, s in self.speed_samples 
+                                          if current_time - t < 2.0]
+                    
+                    if self.speed_samples:
+                        avg_speed = sum(s for _, s in self.speed_samples) / len(self.speed_samples)
+                        self.speed_var.set(f"Speed: {self._format_speed(avg_speed)}")
+                        
+                        if total_bytes > 0 and avg_speed > 0:
+                            remaining = total_bytes - bytes_done
+                            eta_seconds = remaining / avg_speed
+                            self.eta_var.set(f"ETA: {self._format_time(eta_seconds)}")
+                        else:
+                            self.eta_var.set("ETA: --")
+                
+                self.last_bytes = bytes_done
+                self.last_time = current_time
             
-            # Keine negativen Geschwindigkeiten anzeigen
-            if speed >= 0:
-                self.speed_var.set(f"Speed: {self._format_speed(speed)}")
+            # === ELAPSED TIME ===
+            elapsed = current_time - self.start_time
+            self.elapsed_var.set(f"Elapsed: {self._format_time(elapsed)}")
             
-            # ETA nur wenn total_bytes bekannt
-            if total_bytes > 0 and speed > 0:
-                remaining_bytes = total_bytes - bytes_done
-                eta_seconds = remaining_bytes / speed
-                self.eta_var.set(f"ETA: {self._format_time(eta_seconds)}")
+            # === TOTAL BYTES ===
+            self.total_bytes_var.set(f"Total: {bytes_done:,} bytes")
+            
+            # === PROGRESS BAR ===
+            if total_bytes > 0:
+                if self.file_progress['mode'] == 'indeterminate':
+                    self.file_progress.stop()
+                    self.file_progress.configure(mode='determinate')
+                percent = (bytes_done / total_bytes) * 100
+                self.file_progress['value'] = percent
+                self.file_bytes_var.set(f"{bytes_done:,} / {total_bytes:,} bytes")
+                self.file_percent_var.set(f"{percent:.1f}%")
             else:
-                self.eta_var.set("ETA: --")
+                if self.file_progress['mode'] == 'determinate':
+                    self.file_progress.configure(mode='indeterminate')
+                    self.file_progress.start(50)
+                self.file_bytes_var.set(f"{bytes_done:,} bytes")
+                self.file_percent_var.set("--")
             
-            self.last_bytes = bytes_done
-            self.last_time = current_time
-        
-        # Progress Bar und Bytes Display
-        if total_bytes > 0:
-            # Bekannte Größe - normaler Modus
-            if self.progress['mode'] == 'indeterminate':
-                self.progress.stop()
-                self.progress.configure(mode='determinate')
-            percent = (bytes_done / total_bytes) * 100
-            self.progress['value'] = percent
-            self.bytes_var.set(f"{bytes_done:,} / {total_bytes:,} bytes ({percent:.1f}%)")
-        else:
-            # Unbekannte Größe - pulsierender Balken
-            if self.progress['mode'] == 'determinate':
-                self.progress.configure(mode='indeterminate')
-                self.progress.start(50)  # Animation starten
-            self.bytes_var.set(f"{bytes_done:,} bytes")
+            # === FILES COUNTER (Multi-File) ===
+            if self.total_files_count > 0:
+                self.files_var.set(f"Files: {self.files_completed}/{self.total_files_count}")
             
-        self.update()
+            self.update()
+            
+        except tk.TclError:
+            # Dialog wurde geschlossen - ignorieren
+            pass
+        except Exception:
+            # Fehler nicht propagieren
+            pass
     
     def _format_speed(self, bytes_per_sec):
         """Formatiert Geschwindigkeit"""
@@ -3220,7 +3275,7 @@ class BBSTerminal(tk.Tk):
     def __init__(self):
         super().__init__()
         
-        self.title("PYCGMS V1.0 by lA-sTYLe/Quantum (2026)")
+        self.title("PYCGMS V1.1 by lA-sTYLe/Quantum (2026)")
         # 1320x880 garantiert Zoom 4x (1280x800) + Menubar/Statusbar
         self.geometry("1320x880")
         
@@ -3291,9 +3346,6 @@ class BBSTerminal(tk.Tk):
         # Screen Buffer
         self.screen = PETSCIIScreenBuffer(self.screen_width, self.screen_height)
         self.parser = PETSCIIParser(self.screen)
-        
-        # Bell-Callback für Sound registrieren
-        self.parser.set_bell_callback(self.play_bell_sound)
         
         # Renderer
         self.renderer = AnimatedC64ROMFontRenderer(
@@ -3380,92 +3432,6 @@ class BBSTerminal(tk.Tk):
         view_menu.add_command(label="Tools Menu (F10)", command=self.show_tools_menu)
         view_menu.add_separator()
         view_menu.add_command(label="⌨️ Hotkey Editor (Alt+H)", command=self.show_hotkey_editor)
-    
-    def play_bell_sound(self):
-        """Spielt Bell-Sound ab
-        
-        Auslöser:
-        - CTRL+G Tastendruck
-        - BBS sendet $07 (Bell)
-        - BBS sendet £B1 ($5C $42 $31)
-        
-        Während Transfer deaktiviert!
-        
-        Verwendet pygame.mixer für plattformunabhängiges Audio.
-        Fallback auf System-Player wenn pygame nicht verfügbar.
-        """
-        # Während Transfer: Kein Sound!
-        if self.transfer_active:
-            debug_print("[SOUND] Skipped - transfer active")
-            return
-        
-        sound_file = self.settings.get('bell_sound', 'bell.wav')
-        
-        if not os.path.exists(sound_file):
-            debug_print(f"[SOUND] File not found: {sound_file}")
-            self.bell()  # System-Beep als Fallback
-            return
-        
-        debug_print(f"[SOUND] Playing: {sound_file}")
-        
-        # Versuche pygame.mixer (plattformunabhängig)
-        try:
-            if not hasattr(self, '_pygame_mixer_initialized'):
-                import pygame
-                pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
-                self._pygame_mixer_initialized = True
-                self._sound_cache = {}
-            
-            import pygame
-            
-            # Sound cachen für schnelleres Abspielen
-            if sound_file not in self._sound_cache:
-                self._sound_cache[sound_file] = pygame.mixer.Sound(sound_file)
-            
-            self._sound_cache[sound_file].play()
-            debug_print(f"[SOUND] Played via pygame.mixer")
-            return
-            
-        except ImportError:
-            debug_print("[SOUND] pygame not installed, using fallback")
-        except Exception as e:
-            debug_print(f"[SOUND] pygame error: {e}")
-        
-        # Fallback: System-Player im Hintergrund
-        def play_async():
-            try:
-                import subprocess
-                import sys
-                
-                if sys.platform.startswith('linux'):
-                    players = [
-                        ['mpg123', '-q', sound_file],
-                        ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', sound_file],
-                        ['paplay', sound_file],
-                        ['aplay', sound_file],
-                    ]
-                elif sys.platform == 'darwin':
-                    players = [['afplay', sound_file]]
-                elif sys.platform == 'win32':
-                    players = [
-                        ['powershell', '-c', f'(New-Object Media.SoundPlayer "{sound_file}").PlaySync()'],
-                    ]
-                else:
-                    players = []
-                
-                for cmd in players:
-                    try:
-                        subprocess.run(cmd, check=True, capture_output=True, timeout=5)
-                        return
-                    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-                        continue
-                
-                debug_print("[SOUND] No audio player found")
-            except Exception as e:
-                debug_print(f"[SOUND] Error: {e}")
-        
-        import threading
-        threading.Thread(target=play_async, daemon=True).start()
     
     def bind_keys(self):
         """Bind Tastatur"""
@@ -3631,20 +3597,23 @@ class BBSTerminal(tk.Tk):
                 # Finale Update
                 def finish():
                     self.transfer_active = False
-                    if not progress.cancelled:
-                        progress.destroy()
-                        
-                        if i == len(data) - 1:  # Komplett gesendet
-                            debug_print(f"File sent: {len(data)} bytes")
-                            messagebox.showinfo("Send Complete", 
-                                f"File sent successfully!\n"
-                                f"File: {filename}\n"
-                                f"Size: {len(data):,} bytes")
+                    try:
+                        if not progress.cancelled:
+                            progress.destroy()
+                            
+                            if i == len(data) - 1:  # Komplett gesendet
+                                debug_print(f"File sent: {len(data)} bytes")
+                                messagebox.showinfo("Send Complete", 
+                                    f"File sent successfully!\n"
+                                    f"File: {filename}\n"
+                                    f"Size: {len(data):,} bytes")
+                            else:
+                                debug_print(f"Send incomplete: {i+1}/{len(data)} bytes")
                         else:
-                            debug_print(f"Send incomplete: {i+1}/{len(data)} bytes")
-                    else:
-                        progress.destroy()
-                        debug_print("Send cancelled")
+                            progress.destroy()
+                            debug_print("Send cancelled")
+                    except tk.TclError:
+                        pass  # Dialog bereits geschlossen
                 
                 self.after(0, finish)
             
@@ -3695,11 +3664,6 @@ class BBSTerminal(tk.Tk):
             # Sende AUCH an BBS
             self.log_traffic("SEND", 0x0E)
             self.bbs_connection.send_key(0x0E)
-            return "break"
-        
-        # CTRL+G = Bell / Sound abspielen
-        if ctrl and event.keysym.lower() == 'g':
-            self.play_bell_sound()
             return "break"
         
         # Wenn awaiting_bg_color aktiv ist, Zahlentasten abfangen
@@ -3903,34 +3867,40 @@ class BBSTerminal(tk.Tk):
                 filesize = os.path.getsize(filepath)
                 filename = os.path.basename(filepath)
             
-            def callback(done, total, status, **kwargs):
+            def callback(done, total, status, filename=None, **kwargs):
                 # Prüfe ob User Cancel gedrückt hat
                 if progress.cancelled:
-                    transfer.cancel()  # ← Cancel an Transfer weitergeben!
+                    transfer.cancel()
                     return
                 
-                # Handle File-Events für Multi-File Punter
+                # Dateiname: direkt als Parameter oder aus kwargs
+                current_filename = filename or kwargs.get('filename') or kwargs.get('event_filename')
+                
+                # Handle File-Events für Multi-File
                 event = kwargs.get('event')
-                event_filename = kwargs.get('filename')
+                event_filename = kwargs.get('filename') or filename
                 event_size = kwargs.get('size', 0)
                 
                 if event == 'file_start' and event_filename:
                     progress.after(0, lambda fn=event_filename: progress.set_file_active(fn))
+                    progress.files_completed = kwargs.get('file_num', progress.files_completed)
                 elif event == 'file_complete' and event_filename:
                     progress.after(0, lambda fn=event_filename, sz=event_size: progress.set_file_complete(fn, sz))
+                    progress.files_completed += 1
                 elif event == 'file_error' and event_filename:
                     progress.after(0, lambda fn=event_filename: progress.set_file_error(fn))
                 
-                # Rate-Limiting für GUI Updates
-                if not progress.cancelled:
-                    current_time = time.time()
-                    if not hasattr(callback, 'last_update'):
-                        callback.last_update = 0
-                    
-                    # Update nur alle 100ms
-                    if current_time - callback.last_update >= 0.1:
-                        callback.last_update = current_time
-                        progress.after(0, lambda d=done, t=total, s=status: progress.update_progress(d, t, s))
+                # WICHTIG: Rate-Limiting für GUI Updates!
+                # TurboModem ist so schnell dass ohne Throttling Tkinter abstürzt
+                current_time = time.time()
+                if not hasattr(callback, 'last_update'):
+                    callback.last_update = 0
+                
+                # Update nur alle 100ms (= max 10 Updates/Sekunde)
+                if current_time - callback.last_update >= 0.1:
+                    callback.last_update = current_time
+                    progress.after(0, lambda d=done, t=total, s=status, fn=current_filename: 
+                                  progress.update_progress(d, t, s, fn))
             
             success = transfer.send_file(filepath, callback)
             
@@ -3941,7 +3911,10 @@ class BBSTerminal(tk.Tk):
                 
                 self.transfer_active = False
                 if not progress.cancelled:
-                    progress.destroy()
+                    try:
+                        progress.destroy()
+                    except tk.TclError:
+                        pass  # Dialog bereits geschlossen
                     if success:
                         # Berechne Transfer-Zeit
                         end_time = time.time()
@@ -4051,6 +4024,7 @@ class BBSTerminal(tk.Tk):
             
             def callback(done, total, status, filename=None, **kwargs):
                 nonlocal final_bytes, final_status, received_filename, received_header_names
+                
                 final_bytes = done if done > final_bytes else final_bytes
                 final_status = status
                 
@@ -4073,59 +4047,36 @@ class BBSTerminal(tk.Tk):
                         received_header_names.append(filename)
                 
                 # Punter: Prüfe auf FILE_COMPLETE Event
-                if status.startswith("FILE_COMPLETE:"):
-                    # Format: "FILE_COMPLETE:filename:blocks:bytes"
+                if status and status.startswith("FILE_COMPLETE:"):
                     parts = status.split(":")
                     if len(parts) >= 4:
                         file_name = parts[1]
                         blocks = int(parts[2])
                         size_bytes = int(parts[3])
-                        # Tracke dass wir einen Dateinamen vom Header empfangen haben
-                        # Nur echte Namen (nicht generierte download_xxx Namen)
                         if not file_name.startswith('download_') and file_name not in received_header_names:
                             received_header_names.append(file_name)
-                            debug_print(f"[DEBUG] Added to received_header_names: {file_name}")
                         progress.after(0, lambda f=file_name, b=blocks, s=size_bytes: 
                                       progress.add_completed_file(f, b, s))
-                    return  # Nicht als normaler Status anzeigen
-                
-                # Punter: Extrahiere Filename aus Status wenn "[X] filename:" Format
-                if "] " in status and ": " in status:
-                    # Format: "[1] FILENAME.PRG: Complete!" oder "[1] FILENAME.PRG: Block X"
-                    try:
-                        # Extrahiere zwischen "] " und ":"
-                        start = status.index("] ") + 2
-                        end = status.index(":", start)
-                        extracted_name = status[start:end].strip()
-                        if extracted_name and not extracted_name.startswith('download_'):
-                            if extracted_name not in received_header_names:
-                                received_header_names.append(extracted_name)
-                                debug_print(f"[DEBUG] Extracted from status: {extracted_name}")
-                    except (ValueError, IndexError):
-                        pass
+                    return
                 
                 # Prüfe ob User Cancel gedrückt hat
                 if progress.cancelled:
-                    transfer.cancel()  # ← Cancel an Transfer weitergeben!
-                
-                # Bei YModem: Extrahiere Filename aus Status wenn vorhanden
-                if "Receiving:" in status or "file:" in status.lower():
-                    # Parse Filename aus Status
-                    pass  # Wird von YModem direkt gehandhabt
+                    transfer.cancel()
+                    return
                 
                 # WICHTIG: Rate-Limiting für GUI Updates!
                 # TurboModem ist so schnell dass tausende Updates pro Sekunde kommen
                 # Das führt zu RecursionError in Tkinter
-                # Lösung: Max 10 Updates pro Sekunde
-                if not progress.cancelled:
-                    current_time = time.time()
-                    if not hasattr(callback, 'last_update'):
-                        callback.last_update = 0
-                    
-                    # Update nur alle 100ms (= max 10 Updates/Sekunde)
-                    if current_time - callback.last_update >= 0.1:
-                        callback.last_update = current_time
-                        progress.after(0, lambda: progress.update_progress(done, total, status))
+                current_time = time.time()
+                if not hasattr(callback, 'last_update'):
+                    callback.last_update = 0
+                
+                # Update nur alle 100ms (= max 10 Updates/Sekunde)
+                if current_time - callback.last_update >= 0.1:
+                    callback.last_update = current_time
+                    current_fn = received_filename or event_filename or filename
+                    progress.after(0, lambda d=done, t=total, s=status, fn=current_fn: 
+                                  progress.update_progress(d, t, s, fn))
             
             try:
                 success = transfer.receive_file(filepath, callback)
@@ -4142,7 +4093,10 @@ class BBSTerminal(tk.Tk):
                 
                 self.transfer_active = False
                 if not progress.cancelled:
-                    progress.destroy()
+                    try:
+                        progress.destroy()
+                    except tk.TclError:
+                        pass  # Dialog bereits geschlossen
                     if success:
                         # Berechne Transfer-Zeit
                         end_time = time.time()
@@ -4213,18 +4167,49 @@ class BBSTerminal(tk.Tk):
                         
                         # YModem/TurboModem: Zeige Statistiken
                         elif self.current_protocol == TransferProtocol.TURBOMODEM:
-                            # TurboModem: Einzelne Datei mit bekanntem Namen
-                            if received_filename:
-                                # Wir haben den Dateinamen vom Server
-                                downloaded_file = os.path.join(download_dir, received_filename)
+                            # TurboModem Multi-File: Prüfe ob mehrere Dateien empfangen wurden
+                            turbo_files = getattr(transfer, 'turbomodem_received_files', [])
+                            
+                            if turbo_files and len(turbo_files) > 1:
+                                # MULTI-FILE: Zeige alle empfangenen Dateien
+                                total_size = sum(os.path.getsize(f) for f in turbo_files if os.path.exists(f))
+                                bytes_per_sec = total_size / duration if duration > 0 else 0
                                 
+                                # Formatiere Zeit
+                                if duration < 60:
+                                    time_str = f"{duration:.1f} seconds"
+                                else:
+                                    mins = int(duration // 60)
+                                    secs = duration % 60
+                                    time_str = f"{mins} minute{'s' if mins != 1 else ''}, {secs:.1f} seconds"
+                                
+                                # Formatiere Geschwindigkeit
+                                if bytes_per_sec < 1024:
+                                    speed_str = f"{bytes_per_sec:.0f} bytes/sec"
+                                elif bytes_per_sec < 1024 * 1024:
+                                    speed_str = f"{bytes_per_sec/1024:.1f} KB/sec"
+                                else:
+                                    speed_str = f"{bytes_per_sec/(1024*1024):.1f} MB/sec"
+                                
+                                # Dateiliste erstellen
+                                file_list = "\n".join([f"  • {os.path.basename(f)} ({os.path.getsize(f):,} bytes)" 
+                                                      for f in turbo_files if os.path.exists(f)])
+                                
+                                messagebox.showinfo("TurboModem Multi-File Download Complete", 
+                                    f"Files received: {len(turbo_files)}\n"
+                                    f"Saved to: {download_dir}\n\n"
+                                    f"{file_list}\n\n"
+                                    f"Total: {total_size:,} bytes\n"
+                                    f"Time: {time_str}\n"
+                                    f"Speed: {speed_str}")
+                            
+                            elif turbo_files and len(turbo_files) == 1:
+                                # Single file
+                                downloaded_file = turbo_files[0]
                                 if os.path.exists(downloaded_file):
                                     file_size = os.path.getsize(downloaded_file)
-                                    
-                                    # Berechne Geschwindigkeit
                                     bytes_per_sec = file_size / duration if duration > 0 else 0
                                     
-                                    # Formatiere Zeit
                                     if duration < 60:
                                         time_str = f"{duration:.1f} seconds"
                                     else:
@@ -4232,7 +4217,39 @@ class BBSTerminal(tk.Tk):
                                         secs = duration % 60
                                         time_str = f"{mins} minute{'s' if mins != 1 else ''}, {secs:.1f} seconds"
                                     
-                                    # Formatiere Geschwindigkeit
+                                    if bytes_per_sec < 1024:
+                                        speed_str = f"{bytes_per_sec:.0f} bytes/sec"
+                                    elif bytes_per_sec < 1024 * 1024:
+                                        speed_str = f"{bytes_per_sec/1024:.1f} KB/sec"
+                                    else:
+                                        speed_str = f"{bytes_per_sec/(1024*1024):.1f} MB/sec"
+                                    
+                                    messagebox.showinfo("TurboModem Download Complete", 
+                                        f"File: {os.path.basename(downloaded_file)}\n"
+                                        f"Saved to: {download_dir}\n"
+                                        f"Size: {file_size:,} bytes\n"
+                                        f"Time: {time_str}\n"
+                                        f"Speed: {speed_str}")
+                                else:
+                                    messagebox.showinfo("Download Complete", 
+                                        f"File downloaded successfully!\n"
+                                        f"Saved to: {download_dir}")
+                            
+                            elif received_filename:
+                                # Fallback: Einzelne Datei mit bekanntem Namen (alte Methode)
+                                downloaded_file = os.path.join(download_dir, received_filename)
+                                
+                                if os.path.exists(downloaded_file):
+                                    file_size = os.path.getsize(downloaded_file)
+                                    bytes_per_sec = file_size / duration if duration > 0 else 0
+                                    
+                                    if duration < 60:
+                                        time_str = f"{duration:.1f} seconds"
+                                    else:
+                                        mins = int(duration // 60)
+                                        secs = duration % 60
+                                        time_str = f"{mins} minute{'s' if mins != 1 else ''}, {secs:.1f} seconds"
+                                    
                                     if bytes_per_sec < 1024:
                                         speed_str = f"{bytes_per_sec:.0f} bytes/sec"
                                     elif bytes_per_sec < 1024 * 1024:
@@ -5489,7 +5506,7 @@ class BBSTerminal(tk.Tk):
                 # Sende Client-Identifikation an Server
                 try:
                     time.sleep(0.1)  # Kurz warten bis Verbindung stabil
-                    self.bbs_connection.send_raw(b"PYCGMS\r\n")
+                    self.bbs_connection.send_raw(b"PYCGMS 1.1\r\n")
                     debug_print("[Connect] Sent PYCGMS client identification")
                 except Exception as e:
                     debug_print(f"[Connect] Could not send PYCGMS: {e}")
@@ -5578,7 +5595,7 @@ class BBSTerminal(tk.Tk):
             }
             
             try:
-                fg_color = self.screen.current_fg
+                fg_color = self.screen.current_fg  # current_fg nicht fg_color!
                 cursor_color = color_map.get(fg_color, '#FFFFFF')
             except:
                 cursor_color = '#FFFFFF'
@@ -5588,7 +5605,7 @@ class BBSTerminal(tk.Tk):
             self.canvas.create_rectangle(
                 x, y, x + char_width, y + char_height,
                 fill=cursor_color,
-                outline='',
+                outline='',  # No outline
                 tags='cursor'
             )
     

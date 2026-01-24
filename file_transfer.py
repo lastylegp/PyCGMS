@@ -109,6 +109,9 @@ class FileTransfer:
         
         # Letzter empfangener Dateipfad (für High-Speed Protokolle)
         self.last_received_filepath = None
+        
+        # TurboModem Multi-File Support
+        self.turbomodem_received_files = []
     
     def set_live_callback(self, callback):
         """
@@ -337,11 +340,12 @@ class FileTransfer:
             else:
                 return self._punter_send(filepath, callback)  # Single: No header
         
-        # Multi-File: YMODEM, Punter und RAWTCP unterstützen das nativ
+        # Multi-File: YMODEM, Punter, RAWTCP und TURBOMODEM unterstützen das nativ
         # Andere Protokolle: Nur erstes File nehmen
         if isinstance(filepath, list) and len(filepath) > 1:
             if self.protocol not in [TransferProtocol.YMODEM, TransferProtocol.RAWTCP,
-                                     TransferProtocol.PUNTER, TransferProtocol.PUNTER_MULTI]:
+                                     TransferProtocol.PUNTER, TransferProtocol.PUNTER_MULTI,
+                                     TransferProtocol.TURBOMODEM]:
                 self.log(f"⚠ {self.protocol.value} unterstützt kein Multi-File, nehme erste Datei")
                 filepath = filepath[0]
         
@@ -367,6 +371,10 @@ class FileTransfer:
             if self.protocol == TransferProtocol.RAWTCP:
                 return self._rawtcp_send(filepath, callback)  # Akzeptiert String oder Liste
             
+            # TurboModem: Unterstützt auch Multi-File!
+            if self.protocol == TransferProtocol.TURBOMODEM:
+                return self._turbomodem_send(filepath, callback)  # Akzeptiert String oder Liste
+            
             # Restliche Protokolle: Single-File only
             if isinstance(filepath, list):
                 if len(filepath) == 0:
@@ -376,8 +384,6 @@ class FileTransfer:
             
             if self.protocol == TransferProtocol.ZMODEM:
                 return self._zmodem_send(filepath, callback)
-            elif self.protocol == TransferProtocol.TURBOMODEM:
-                return self._turbomodem_send(filepath, callback)
             else:
                 raise ValueError(f"Unbekanntes Protokoll: {self.protocol}")
     
@@ -416,7 +422,11 @@ class FileTransfer:
                 self.log("    -> routing to _punter_receive()")
                 return self._punter_receive(filepath, callback)
             elif self.protocol == TransferProtocol.TURBOMODEM:
-                return self._turbomodem_receive(filepath, callback)
+                # TurboModem gibt (success, files_list) zurück für Multi-File Support
+                success, received_files = self._turbomodem_receive(filepath, callback)
+                # Speichere empfangene Dateien für späteren Zugriff
+                self.turbomodem_received_files = received_files if received_files else []
+                return success
             # HIGH-SPEED PROTOCOLS - return (success, filepath) tuple
             elif self.protocol == TransferProtocol.RAWTCP:
                 self.log("    -> routing to _rawtcp_receive()")
@@ -3602,27 +3612,56 @@ class FileTransfer:
             import traceback
             self.log(traceback.format_exc())
             return False
+
     def _turbomodem_send(self, filepath, callback):
-        """TurboModem Send - 10-20x faster than XModem!"""
+        """TurboModem Send - 10-20x faster than XModem! Supports Multi-File!"""
         from turbomodem import TurboModem
+        import os
         
-        self.log(f"\n{'='*60}")
-        self.log(f"TURBOMODEM SEND: {filepath}")
-        self.log(f"{'='*60}")
+        # Multi-File oder Single-File?
+        is_multi = isinstance(filepath, list)
+        
+        if is_multi:
+            self.log(f"\n{'='*60}")
+            self.log(f"TURBOMODEM MULTI-SEND: {len(filepath)} files")
+            for f in filepath:
+                self.log(f"  - {os.path.basename(f)}")
+            self.log(f"{'='*60}")
+        else:
+            self.log(f"\n{'='*60}")
+            self.log(f"TURBOMODEM SEND: {filepath}")
+            self.log(f"{'='*60}")
         
         try:
             turbo = TurboModem(self.connection, debug=self.debug_enabled)
-            success = turbo.send_file(filepath, callback)
             
-            if success:
-                bps, duration = turbo.get_speed()
-                self.log(f"✓ TURBOMODEM SEND ERFOLGREICH")
-                self.log(f"  Duration: {duration:.2f}s")
-                self.log(f"  Speed: {bps/1024:.2f} KB/s")
-                self.log(f"  Blocks sent: {turbo.stats['blocks_sent']}")
-                self.log(f"  Retransmits: {turbo.stats['retransmits']}")
+            if is_multi:
+                # Multi-File: send_files() verwenden
+                success, files_sent = turbo.send_files(filepath, callback)
+                
+                if success:
+                    bps, duration = turbo.get_speed()
+                    self.log(f"✓ TURBOMODEM MULTI-SEND ERFOLGREICH")
+                    self.log(f"  Files sent: {files_sent}/{len(filepath)}")
+                    self.log(f"  Duration: {duration:.2f}s")
+                    self.log(f"  Speed: {bps/1024:.2f} KB/s")
+                    self.log(f"  Blocks sent: {turbo.stats['blocks_sent']}")
+                    self.log(f"  Retransmits: {turbo.stats['retransmits']}")
+                else:
+                    self.log(f"✗ TURBOMODEM MULTI-SEND FEHLGESCHLAGEN ({files_sent} von {len(filepath)} gesendet)")
             else:
-                self.log("✗ TURBOMODEM SEND FEHLGESCHLAGEN")
+                # Single-File: send_file() verwenden
+                success = turbo.send_file(filepath, callback)
+                
+                if success:
+                    bps, duration = turbo.get_speed()
+                    self.log(f"✓ TURBOMODEM SEND ERFOLGREICH")
+                    self.log(f"  Duration: {duration:.2f}s")
+                    self.log(f"  Speed: {bps/1024:.2f} KB/s")
+                    self.log(f"  Blocks sent: {turbo.stats['blocks_sent']}")
+                    self.log(f"  Retransmits: {turbo.stats['retransmits']}")
+                else:
+                    self.log("✗ TURBOMODEM SEND FEHLGESCHLAGEN")
             
             return success
             
@@ -3633,7 +3672,7 @@ class FileTransfer:
             return False
     
     def _turbomodem_receive(self, filepath, callback):
-        """TurboModem Receive - 10-20x faster than XModem!"""
+        """TurboModem Receive - 10-20x faster than XModem! Supports Multi-File!"""
         from turbomodem import TurboModem
         import os
         
@@ -3666,26 +3705,31 @@ class FileTransfer:
         
         try:
             turbo = TurboModem(self.connection, debug=self.debug_enabled)
-            # Übergebe NUR das Verzeichnis, nicht den vollen Pfad
-            success, actual_filepath = turbo.receive_file(target_dir, callback)
             
-            if success:
+            # MULTI-FILE: receive_files() empfängt alle Dateien bis TBND
+            success, received_files = turbo.receive_files(target_dir, callback)
+            
+            if success and received_files:
                 bps, duration = turbo.get_speed()
-                self.log(f"✓ TURBOMODEM RECEIVE ERFOLGREICH")
-                self.log(f"  Saved to: {actual_filepath}")
+                self.log(f"✓ TURBOMODEM MULTI-RECEIVE ERFOLGREICH")
+                self.log(f"  Files received: {len(received_files)}")
+                for f in received_files:
+                    self.log(f"    - {os.path.basename(f)}")
                 self.log(f"  Duration: {duration:.2f}s")
                 self.log(f"  Speed: {bps/1024:.2f} KB/s")
                 self.log(f"  Blocks received: {turbo.stats['blocks_received']}")
+                
+                # Gib Liste der empfangenen Dateien zurück für Multi-File Support
+                return True, received_files
             else:
                 self.log("✗ TURBOMODEM RECEIVE FEHLGESCHLAGEN")
-            
-            return success
+                return False, []
             
         except Exception as e:
             self.log(f"ERROR: {str(e)}")
             import traceback
             self.log(traceback.format_exc())
-            return False
+            return False, []
 
     # =========================================================================
     # HIGH-SPEED PROTOCOLS (für LAN - maximaler Speed)

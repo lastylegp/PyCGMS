@@ -1,4 +1,4 @@
-# PYCGMS V1.0 - Installation Guide
+# PYCGMS V1.1 - Installation Guide
 
 Quick installation instructions for both Windows and Linux.
 
@@ -38,7 +38,11 @@ If automatic installer doesn't work:
    ```cmd
    python -m pip install pygame
    ```
-4. **Run Terminal**
+4. **Install xmodem**
+   ```cmd
+   python -m pip install xmodem
+   ```
+5. **Run Terminal**
    ```cmd
    python bbs_terminal.py
    ```
@@ -73,13 +77,13 @@ If automatic installer doesn't work:
 1. **Install Python 3.8+** (usually pre-installed)
    ```bash
    # Ubuntu/Debian
-   sudo apt install python3 python3-pip python3-tk python3-pygame
+   sudo apt install python3 python3-pip python3-tk python3-pygame python3-xmodem
 
    # Fedora/RHEL
-   sudo dnf install python3 python3-pip python3-tkinter python3-pygame
+   sudo dnf install python3 python3-pip python3-tkinter python3-pygame python3-xmodem
 
    # Arch
-   sudo pacman -S python python-pip tk pygame
+   sudo pacman -S python python-pip tk pygame xmodem
    ```
 
 2. **Install Pillow**
@@ -90,7 +94,11 @@ If automatic installer doesn't work:
    ```cmd
    python -m pip install pygame
    ```
-4. **Run Terminal**
+4. **Install xmodem**
+   ```cmd
+   python -m pip install xmodem
+   ```
+5. **Run Terminal**
    ```bash
    python3 bbs_terminal.py
    ```
@@ -117,8 +125,11 @@ macOS is similar to Linux:
    ```bash
    pip3 install pygame
    ```
-
-4. **Run Terminal**
+5. **Install xmodem**
+   ```bash
+   pip3 install xmodem
+   ```
+6. **Run Terminal**
    ```bash
    python3 bbs_terminal.py
    ```
@@ -303,7 +314,7 @@ After successful installation:
 
 ---
 
-**Welcome to PYCGMS V1.0!**
+**Welcome to PYCGMS V1.1!**
 
 The modern way to experience classic BBS culture.
 
