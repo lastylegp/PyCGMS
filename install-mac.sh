@@ -82,17 +82,16 @@ echo ""
 # -------------------------------------------------------------------
 echo -e "${BLUE}[3/6] Installing Python dependencies...${NC}"
 
-$PIP_CMD install --user pillow xmodem
+$PIP_CMD install --user pillow
 
 if [ $? -ne 0 ]; then
-    echo -e "${RED}ERROR: Failed to install packages${NC}"
+    echo -e "${RED}ERROR: Failed to install Pillow${NC}"
     echo "Try manually:"
-    echo "  $PIP_CMD install --user pillow xmodem"
+    echo "  $PIP_CMD install --user pillow"
     exit 1
 fi
 
 echo -e "${GREEN}Pillow installed${NC}"
-echo -e "${GREEN}xmodem installed${NC}"
 echo ""
 
 # -------------------------------------------------------------------
