@@ -12,4 +12,5 @@ overwriting Your own Files.
 24.01.2026 v1.1
 - Fixed / changed Turbomodem Batch transfers to work smother at the-hidden.
 
-  
+31.01.2026
+- added Return Key to dial highlighted BBS

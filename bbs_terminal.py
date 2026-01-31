@@ -678,6 +678,7 @@ class BBSDialDialog(tk.Toplevel):
         self.listbox.bind('<Button-5>', self.on_mousewheel)  # Linux scroll down
         self.listbox.bind('<Up>', self.on_arrow_key)
         self.listbox.bind('<Down>', self.on_arrow_key)
+        self.listbox.bind('<Return>', lambda e: self.connect())  # Enter = Connect
         
         # Hotkeys: 1-9, A-Z
         for i in range(1, 10):  # 1-9
