@@ -4691,15 +4691,16 @@ class BBSTerminal(tk.Tk):
         self.status_var.set(text)
     
     def update_status_connected(self, extra_info=""):
-        """Aktualisiert Statusbar für Connected State mit Protocol"""
+        """Aktualisiert Statusbar für Connected State mit Protocol und Speed"""
         host = self.current_bbs_host
         port = self.current_bbs_port
         protocol = self.current_protocol.value
+        speed = self.settings.get('transfer_speed', 'normal')
         
         if extra_info:
-            self.status_var.set(f"Connected to {host}:{port} | {extra_info} | Protocol: {protocol}")
+            self.status_var.set(f"Connected to {host}:{port} | {extra_info} | Protocol: {protocol} | Speed: {speed}")
         else:
-            self.status_var.set(f"Connected to {host}:{port} | Protocol: {protocol} | F9=Login F1=Upload F3=Download")
+            self.status_var.set(f"Connected to {host}:{port} | Protocol: {protocol} | Speed: {speed}")
     
     def toggle_charset(self):
         """F8 - Togglet zwischen UPPER/LOWER Charset"""
@@ -4781,7 +4782,7 @@ class BBSTerminal(tk.Tk):
         debug_print(f"Protocol changed to {self.current_protocol.value}")
         
         if self.connected:
-            self.update_status_connected(f"Protocol: {self.current_protocol.value}")
+            self.update_status_connected()
         else:
             self.update_status(f"Protocol: {self.current_protocol.value} | F7=Dial F9=Login F1=Upload F3=Download")
     
