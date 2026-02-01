@@ -16,4 +16,4 @@ overwriting Your own Files.
 - added Return Key to dial highlighted BBS
 
 01.02.2026
-- Fixed double Protocol Displayed when Protocol Chnaged with ALT+P
+- Fixed double Protocol Displayed when Protocol Changed with ALT+P
