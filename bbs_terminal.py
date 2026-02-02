@@ -5,6 +5,8 @@ import json
 import threading
 import time
 import os
+import socket
+import queue
 from PIL import ImageTk
 
 from petscii_parser import PETSCIIScreenBuffer, PETSCIIParser
@@ -13,6 +15,9 @@ from telnet_client import BBSConnection, set_telnet_debug
 from c64_keyboard import get_petscii_for_key, is_printable_key
 from file_transfer import FileTransfer, TransferProtocol
 from terminal_extensions import ScrollbackBuffer, ScrollbackViewer
+
+# Version (single source of truth)
+PYCGMS_VERSION = "1.1"
 
 # Global debug flag - set by BBSTerminal when settings are loaded
 _TERMINAL_DEBUG = False
@@ -3270,13 +3275,232 @@ class HotkeyEditDialog(tk.Toplevel):
         self.destroy()
 
 
+class ServerPortDialog(tk.Toplevel):
+    """Simple dialog asking for the server listen port"""
+    
+    def __init__(self, parent, default_port=64128):
+        super().__init__(parent)
+        self.title("Server Mode")
+        self.geometry("340x150")
+        self.resizable(False, False)
+        self.result = None
+        
+        # Content
+        frame = ttk.Frame(self, padding=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(frame, text="Listen Port:", font=('Arial', 11)).pack(anchor=tk.W)
+        
+        self.port_var = tk.StringVar(value=str(default_port))
+        self.port_entry = ttk.Entry(frame, textvariable=self.port_var, font=('Arial', 12), width=10)
+        self.port_entry.pack(anchor=tk.W, pady=(5, 15))
+        self.port_entry.select_range(0, tk.END)
+        self.port_entry.focus_set()
+        
+        # Buttons
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X)
+        ttk.Button(btn_frame, text="Start", command=self.on_ok, width=10).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy, width=10).pack(side=tk.LEFT)
+        
+        self.bind('<Return>', lambda e: self.on_ok())
+        self.bind('<Escape>', lambda e: self.destroy())
+        
+        self.transient(parent)
+        self.grab_set()
+        
+        # Center on parent
+        self.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() // 2) - (self.winfo_width() // 2)
+        y = parent.winfo_y() + (parent.winfo_height() // 2) - (self.winfo_height() // 2)
+        self.geometry(f"+{x}+{y}")
+    
+    def on_ok(self):
+        try:
+            port = int(self.port_var.get().strip())
+            if not (1 <= port <= 65535):
+                raise ValueError
+            self.result = port
+            self.destroy()
+        except ValueError:
+            messagebox.showwarning("Invalid Port", 
+                "Please enter a valid port number (1-65535).", parent=self)
+
+
+class ServerClientAdapter:
+    """Adapts a raw socket to the interface expected by update_loop and FileTransfer.
+    Mimics the telnet_client interface completely:
+    - has_received_data(), get_received_data(timeout), get_received_data_raw(size, timeout)
+    - send_raw(data) -> returns True on success
+    - send_bytes(data), send_key(byte_val)
+    - clear_receive_buffer()
+    - settimeout(timeout)
+    - connected, receive_queue, socket (alias for sock)
+    
+    The socket stays in BLOCKING mode so that FileTransfer can do direct
+    blocking reads via get_received_data_raw(). The background recv thread
+    uses select() and pauses during transfers (_transfer_mode)."""
+    
+    def __init__(self, sock):
+        self.sock = sock
+        self.socket = sock  # Alias - FileTransfer uses self.connection.socket
+        self.sock.setblocking(True)
+        self.sock.settimeout(None)
+        self.connected = True
+        self.receive_queue = queue.Queue()
+        self._recv_lock = threading.Lock()
+        self._transfer_mode = False
+        
+        # Start receive thread
+        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self._recv_thread.start()
+    
+    def _recv_loop(self):
+        """Background thread: read from socket into queue using select()"""
+        import select
+        while self.connected:
+            if self._transfer_mode:
+                time.sleep(0.05)
+                continue
+            try:
+                readable, _, _ = select.select([self.sock], [], [], 0.05)
+                if readable:
+                    data = self.sock.recv(4096)
+                    if data:
+                        self.receive_queue.put(data)
+                    else:
+                        self.connected = False
+                        break
+            except (ValueError, OSError):
+                self.connected = False
+                break
+    
+    def set_transfer_mode(self, active):
+        """Pause/resume the recv thread so FileTransfer can read the socket directly"""
+        self._transfer_mode = active
+        if active:
+            # Give recv thread time to actually pause
+            time.sleep(0.1)
+    
+    def settimeout(self, timeout):
+        """Set socket timeout - used by FileTransfer for blocking reads"""
+        try:
+            self.sock.settimeout(timeout)
+        except OSError:
+            pass
+    
+    def has_received_data(self):
+        return not self.receive_queue.empty()
+    
+    def get_received_data(self, timeout=0.1):
+        """Get data from queue with optional timeout. Returns bytes or None."""
+        try:
+            return self.receive_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+    
+    def get_received_data_raw(self, size, timeout=3):
+        """Blocking read of exactly size bytes from socket (used by FileTransfer).
+        Reads directly from socket, not from queue."""
+        result = bytearray()
+        end_time = time.time() + timeout
+        old_timeout = self.sock.gettimeout()
+        
+        try:
+            while len(result) < size and time.time() < end_time:
+                remaining_time = end_time - time.time()
+                if remaining_time <= 0:
+                    break
+                self.sock.settimeout(min(remaining_time, 1.0))
+                try:
+                    chunk = self.sock.recv(size - len(result))
+                    if chunk:
+                        result.extend(chunk)
+                    else:
+                        self.connected = False
+                        break
+                except socket.timeout:
+                    continue
+                except OSError:
+                    self.connected = False
+                    break
+        finally:
+            try:
+                self.sock.settimeout(old_timeout)
+            except OSError:
+                pass
+        
+        return bytes(result) if result else None
+    
+    def clear_receive_buffer(self):
+        """Discard all queued received data"""
+        while not self.receive_queue.empty():
+            try:
+                self.receive_queue.get_nowait()
+            except queue.Empty:
+                break
+    
+    def send_raw(self, data):
+        """Send raw bytes to the client. Returns True on success (FileTransfer checks this!)."""
+        if not self.connected:
+            return False
+        try:
+            if isinstance(data, (bytes, bytearray)):
+                self.sock.sendall(data)
+            else:
+                self.sock.sendall(data.encode('latin-1'))
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.connected = False
+            return False
+    
+    def send_bytes(self, data):
+        """Send multiple bytes (alias for send_raw, used by hotkey sender)"""
+        return self.send_raw(data)
+    
+    def send_key(self, byte_val):
+        """Send a single byte"""
+        return self.send_raw(bytes([byte_val]))
+    
+    def close(self):
+        self.connected = False
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+class ServerConnectionWrapper:
+    """Lightweight wrapper that mimics BBSConnection for server mode"""
+    
+    def __init__(self, client_adapter):
+        self.client = client_adapter
+        self.config = {'host': 'server', 'port': 0}
+    
+    def send_key(self, petscii_byte):
+        """Send a single PETSCII byte"""
+        self.client.send_raw(bytes([petscii_byte]))
+    
+    def send_raw(self, data):
+        """Send raw bytes"""
+        self.client.send_raw(data)
+    
+    def send_bytes(self, data):
+        """Send multiple bytes"""
+        self.client.send_bytes(data)
+    
+    def disconnect(self):
+        """Disconnect the client"""
+        self.client.close()
+
+
 class BBSTerminal(tk.Tk):
     """Hauptanwendung mit allen Features"""
     
     def __init__(self):
         super().__init__()
         
-        self.title("PYCGMS V1.1 by lA-sTYLe/Quantum (2026)")
+        self.title(f"PYCGMS V{PYCGMS_VERSION} by lA-sTYLe/Quantum (2026)")
         # 1320x880 garantiert Zoom 4x (1280x800) + Menubar/Statusbar
         self.geometry("1320x880")
         
@@ -3302,7 +3526,7 @@ class BBSTerminal(tk.Tk):
         
         self.screen_width = self.settings.get('screen_width', 40)
         self.screen_height = 25
-        self.transfer_active = False
+        self._transfer_active = False
         self.current_zoom = 4  # Starte mit höherem Zoom
         self.fullscreen = False  # Fullscreen-Status
         
@@ -3344,6 +3568,12 @@ class BBSTerminal(tk.Tk):
         # Scrollback Buffer
         self.scrollback = ScrollbackBuffer(max_lines=10000)
         
+        # Server Mode State
+        self.server_mode = False
+        self.server_socket = None
+        self.server_thread = None
+        self.server_port = 64128  # Default port
+        
         # Screen Buffer
         self.screen = PETSCIIScreenBuffer(self.screen_width, self.screen_height)
         self.parser = PETSCIIParser(self.screen)
@@ -3379,6 +3609,20 @@ class BBSTerminal(tk.Tk):
         
         # Update Loop
         self.after(50, self.update_loop)
+    
+    @property
+    def transfer_active(self):
+        return self._transfer_active
+    
+    @transfer_active.setter
+    def transfer_active(self, value):
+        self._transfer_active = value
+        # In server mode, pause/resume the recv thread so FileTransfer
+        # can read the socket directly for protocol handshakes
+        if self.server_mode and self.bbs_connection and hasattr(self.bbs_connection, 'client'):
+            client = self.bbs_connection.client
+            if hasattr(client, 'set_transfer_mode'):
+                client.set_transfer_mode(value)
     
     def create_ui(self):
         """Erstellt UI"""
@@ -3421,6 +3665,12 @@ class BBSTerminal(tk.Tk):
         transfer_menu.add_separator()
         transfer_menu.add_command(label="Cycle Protocol (Alt+P)", command=self.cycle_protocol)
         transfer_menu.add_command(label="Settings (F5)", command=self.show_settings)
+        
+        # Server
+        self.server_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Server", menu=self.server_menu)
+        self.server_menu.add_command(label="Start Server Mode...", command=self.start_server_mode)
+        self.server_menu.add_command(label="Stop Server Mode", command=self.stop_server_mode, state=tk.DISABLED)
         
         # View
         view_menu = tk.Menu(menubar, tearoff=0)
@@ -3719,6 +3969,9 @@ class BBSTerminal(tk.Tk):
                 self.log_traffic("SEND", petscii_byte)
                 self.bbs_connection.send_key(petscii_byte)
                 self.scrollback.add_bytes([petscii_byte])
+                # Server Mode: Local Echo
+                if self.server_mode:
+                    self.parser.parse_bytes(bytes([petscii_byte]))
             return "break"
         
         # 2. DANN: Standard C64 Keyboard Mapping
@@ -3738,6 +3991,11 @@ class BBSTerminal(tk.Tk):
             
             self.bbs_connection.send_key(petscii_code)
             self.scrollback.add_bytes([petscii_code])
+            
+            # Server Mode: Local Echo
+            if self.server_mode:
+                self.parser.parse_bytes(bytes([petscii_code]))
+            
             return "break"
     
     def show_dial_dialog(self):
@@ -4686,6 +4944,154 @@ class BBSTerminal(tk.Tk):
         """Alt+H - Öffnet Hotkey Editor"""
         HotkeyEditorDialog(self)
     
+    # ================================================================
+    # SERVER MODE
+    # ================================================================
+    
+    def start_server_mode(self):
+        """Start Server Mode - ask for port and listen for incoming connections"""
+        if self.server_mode:
+            messagebox.showinfo("Server Mode", "Server is already running!", parent=self)
+            return
+        
+        if self.connected:
+            messagebox.showwarning("Server Mode", 
+                "Please disconnect from the current BBS first.", parent=self)
+            return
+        
+        # Ask for listen port
+        dialog = ServerPortDialog(self, self.server_port)
+        self.wait_window(dialog)
+        
+        if dialog.result is None:
+            return
+        
+        self.server_port = dialog.result
+        
+        # Start listening
+        try:
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.settimeout(1.0)  # Timeout for clean shutdown
+            self.server_socket.bind(('0.0.0.0', self.server_port))
+            self.server_socket.listen(1)
+        except OSError as e:
+            messagebox.showerror("Server Mode", 
+                f"Cannot bind to port {self.server_port}:\n{e}", parent=self)
+            self.server_socket = None
+            return
+        
+        self.server_mode = True
+        
+        # Update menu state
+        self.server_menu.entryconfig("Start Server Mode...", state=tk.DISABLED)
+        self.server_menu.entryconfig("Stop Server Mode", state=tk.NORMAL)
+        
+        self.status_var.set(f"Server Mode | Listening on port {self.server_port} ...")
+        debug_print(f"[SERVER] Listening on port {self.server_port}")
+        
+        # Show message on terminal screen (UC/LC switched)
+        # $0E = switch to lowercase mode, $0D = carriage return
+        # PETSCII LC mode has swapped case: upper<->lower
+        msg = f"\x0esERVER mODE ACTIVATED\rLISTENING ON PORT {self.server_port} ...\r\r"
+        self.parser.parse_bytes(msg.encode('latin-1'))
+        
+        # Start accept thread
+        self.server_thread = threading.Thread(target=self._server_accept_loop, daemon=True)
+        self.server_thread.start()
+    
+    def stop_server_mode(self):
+        """Stop Server Mode"""
+        if not self.server_mode:
+            return
+        
+        self.server_mode = False
+        
+        # Close server socket (will unblock accept)
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except Exception:
+                pass
+            self.server_socket = None
+        
+        # Disconnect any active server connection
+        if self.connected:
+            self.disconnect()
+        
+        # Update menu state
+        self.server_menu.entryconfig("Start Server Mode...", state=tk.NORMAL)
+        self.server_menu.entryconfig("Stop Server Mode", state=tk.DISABLED)
+        
+        self.status_var.set("Server Mode stopped")
+        debug_print("[SERVER] Server mode stopped")
+    
+    def _server_accept_loop(self):
+        """Background thread: wait for incoming connections"""
+        while self.server_mode and self.server_socket:
+            try:
+                client_sock, client_addr = self.server_socket.accept()
+                debug_print(f"[SERVER] Connection from {client_addr[0]}:{client_addr[1]}")
+                
+                # Hand off to main thread via after()
+                self.after(0, lambda s=client_sock, a=client_addr: self._server_on_connect(s, a))
+                
+                # Wait until this connection ends before accepting another
+                while self.server_mode and self.connected:
+                    time.sleep(0.2)
+                
+                # Back to listening
+                if self.server_mode:
+                    self.after(0, lambda: self.status_var.set(
+                        f"Server Mode | Listening on port {self.server_port} ..."))
+                
+            except socket.timeout:
+                continue
+            except OSError:
+                break  # Socket closed
+        
+        debug_print("[SERVER] Accept loop ended")
+    
+    def _server_on_connect(self, client_sock, client_addr):
+        """Called on main thread when a client connects"""
+        if self.connected:
+            # Already connected, reject
+            try:
+                client_sock.close()
+            except Exception:
+                pass
+            return
+        
+        try:
+            # Wrap the raw socket in a ServerClientAdapter that mimics
+            # the interface expected by update_loop (has_received_data, etc.)
+            adapter = ServerClientAdapter(client_sock)
+            
+            # Create a lightweight wrapper that looks like BBSConnection
+            self.bbs_connection = ServerConnectionWrapper(adapter)
+            self.connected = True
+            
+            self.current_bbs_host = client_addr[0]
+            self.current_bbs_port = client_addr[1]
+            
+            self.status_var.set(
+                f"Server Mode | Client connected: {client_addr[0]}:{client_addr[1]}")
+            debug_print(f"[SERVER] Client active: {client_addr[0]}:{client_addr[1]}")
+            
+            # Send welcome message with UC/LC switch ($0E)
+            # PETSCII LC mode has swapped case: upper<->lower
+            welcome = f"\x0ewELCOME TO pycgms v{PYCGMS_VERSION}\r\n"
+            adapter.send_raw(welcome.encode('latin-1'))
+            debug_print(f"[SERVER] Sent welcome: Welcome to PYCGMS V{PYCGMS_VERSION}")
+            
+        except Exception as e:
+            debug_print(f"[SERVER] Error accepting client: {e}")
+            try:
+                client_sock.close()
+            except Exception:
+                pass
+
+
     def update_status(self, text):
         """Aktualisiert Statusbar"""
         self.status_var.set(text)
@@ -5508,8 +5914,8 @@ class BBSTerminal(tk.Tk):
                 # Sende Client-Identifikation an Server
                 try:
                     time.sleep(0.1)  # Kurz warten bis Verbindung stabil
-                    self.bbs_connection.send_raw(b"PYCGMS 1.1\r\n")
-                    debug_print("[Connect] Sent PYCGMS client identification")
+                    self.bbs_connection.send_raw(f"PYCGMS {PYCGMS_VERSION}\r\n".encode())
+                    debug_print(f"[Connect] Sent PYCGMS client identification")
                 except Exception as e:
                     debug_print(f"[Connect] Could not send PYCGMS: {e}")
                 
@@ -5527,7 +5933,10 @@ class BBSTerminal(tk.Tk):
         if self.bbs_connection:
             self.bbs_connection.disconnect()
         self.connected = False
-        self.status_var.set("Disconnected")
+        if self.server_mode:
+            self.status_var.set(f"Server Mode | Listening on port {self.server_port} ...")
+        else:
+            self.status_var.set("Disconnected")
     
     def render_display(self):
         """Rendert und zeigt das Display mit Cursor"""
@@ -5674,7 +6083,10 @@ class BBSTerminal(tk.Tk):
                             # Nur Disconnect wenn Queue WIRKLICH leer UND Verbindung getrennt
                             if not has_more_data and not client.connected:
                                 self.connected = False
-                                self.status_var.set("Disconnected (BBS closed connection)")
+                                if self.server_mode:
+                                    self.status_var.set(f"Server Mode | Client disconnected | Listening on port {self.server_port} ...")
+                                else:
+                                    self.status_var.set("Disconnected (BBS closed connection)")
                                 debug_print("[UPDATE_LOOP] Connection closed and queue completely empty")
                     except Exception:
                         pass

@@ -17,3 +17,8 @@ overwriting Your own Files.
 
 01.02.2026
 - Fixed double Protocol Displayed when Protocol Changed with ALT+P
+
+02.02.2026
+- added Server Mode to act like a BBS for e.g. testing UD Protocols.
+
+
