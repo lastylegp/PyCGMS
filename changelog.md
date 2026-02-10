@@ -18,7 +18,7 @@ overwriting Your own Files.
 01.02.2026
 - Fixed double Protocol Displayed when Protocol Changed with ALT+P
 
-02.02.2026
-- added Server Mode to act like a BBS for e.g. testing UD Protocols.
-
-
+05.022026 v1.2
+- added Comport connection to access virtual Comports
+- fixed visual Block Counter in Xmodem and XmodemCRC transfers
+- removed File x/y Label in Transfer Status

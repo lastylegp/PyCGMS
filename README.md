@@ -87,6 +87,7 @@ python run_terminal.py
 | **F9** | Send auto-login |
 | **F11** | Toggle fullscreen |
 | **F12** | Enable/Disable Connection logging to File |
+| **Alt+E** | toggle Echo mode |
 | **Alt+H** | Hotkey editor |
 | **Alt+S** | Screenshot of current Terminal Window |
 | **Alt+P** | Toggle protocol |

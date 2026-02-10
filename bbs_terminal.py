@@ -9,15 +9,29 @@ import socket
 import queue
 from PIL import ImageTk
 
+# Serial port support (optional)
+try:
+    import serial
+    import serial.tools.list_ports
+    HAS_SERIAL = True
+except ImportError:
+    HAS_SERIAL = False
+
 from petscii_parser import PETSCIIScreenBuffer, PETSCIIParser
 from c64_rom_renderer import AnimatedC64ROMFontRenderer
-from telnet_client import BBSConnection, set_telnet_debug
+from telnet_client import BBSConnection
+try:
+    from telnet_client import set_telnet_debug
+except ImportError:
+    # Fallback wenn set_telnet_debug nicht existiert
+    def set_telnet_debug(enabled):
+        pass
 from c64_keyboard import get_petscii_for_key, is_printable_key
 from file_transfer import FileTransfer, TransferProtocol
 from terminal_extensions import ScrollbackBuffer, ScrollbackViewer
 
 # Version (single source of truth)
-PYCGMS_VERSION = "1.1"
+PYCGMS_VERSION = "1.2"
 
 # Global debug flag - set by BBSTerminal when settings are loaded
 _TERMINAL_DEBUG = False
@@ -108,10 +122,7 @@ class TransferProgressDialog(tk.Toplevel):
         ttk.Label(stats_frame, textvariable=self.elapsed_var, font=('Arial', 10)).grid(row=1, column=0, sticky=tk.W, padx=5)
         ttk.Label(stats_frame, textvariable=self.total_bytes_var, font=('Arial', 10)).grid(row=1, column=1, sticky=tk.W, padx=5)
         
-        # === MULTI-FILE COUNTER ===
-        self.files_var = tk.StringVar(value="")
-        self.files_label = ttk.Label(main_frame, textvariable=self.files_var, font=('Arial', 11))
-        self.files_label.pack(pady=5)
+        # === MULTI-FILE COUNTER (removed - redundant, blue label [x/y] already shows this) ===
         
         # === FILE LIST (wenn Multi-File) ===
         if show_file_list:
@@ -373,11 +384,8 @@ class TransferProgressDialog(tk.Toplevel):
             self.file_listbox.insert(tk.END, f"⏳ {filename}")
     
     def _update_files_counter(self):
-        """Aktualisiert den Files x/y Counter"""
-        if self.total_files > 0:
-            self.files_var.set(f"Files: {self.completed_count}/{self.total_files}")
-        else:
-            self.files_var.set("")
+        """Aktualisiert den Files x/y Counter (disabled - blue label shows this)"""
+        pass
     
     def set_file_active(self, filename):
         """Markiert ein File als aktiv (wird gerade übertragen)"""
@@ -570,10 +578,6 @@ class TransferProgressDialog(tk.Toplevel):
                 self.file_bytes_var.set(f"{bytes_done:,} bytes")
                 self.file_percent_var.set("--")
             
-            # === FILES COUNTER (Multi-File) ===
-            if self.total_files_count > 0:
-                self.files_var.set(f"Files: {self.files_completed}/{self.total_files_count}")
-            
             self.update()
             
         except tk.TclError:
@@ -612,7 +616,7 @@ class BBSDialDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("BBS Dialer")
-        self.geometry("950x650")
+        self.geometry("950x720")
         self.result = None
         self.current_photo = None  # Für Bildanzeige
         
@@ -731,7 +735,8 @@ class BBSDialDialog(tk.Toplevel):
             ('Password:', 'password_label'),
             ('Send Delay:', 'delay_label'),
             ('Protocol:', 'protocol_label'),
-            ('Speed:', 'speed_label')
+            ('Speed:', 'speed_label'),
+            ('Connection:', 'connection_label')
         ]
         
         for row, (label_text, var_name) in enumerate(labels):
@@ -745,6 +750,19 @@ class BBSDialDialog(tk.Toplevel):
         info_frame.pack(fill=tk.X, padx=10, pady=5)
         ttk.Label(info_frame, text="💡 Hotkeys: 1-9, A-Z | Double-click = Connect | Right-click = Edit/Delete | Scroll = Navigate", 
                  font=('Arial', 9, 'italic')).pack(anchor=tk.W)
+        
+        # Connection Mode Info (globaler Default)
+        conn_mode = parent.connection_mode if hasattr(parent, 'connection_mode') else 'ip'
+        if conn_mode == 'comport':
+            serial_port = parent.serial_port if hasattr(parent, 'serial_port') else '?'
+            serial_baud = parent.serial_baudrate if hasattr(parent, 'serial_baudrate') else 9600
+            conn_info = f"📡 Global Default: COM-Port ({serial_port} @ {serial_baud} baud)"
+            conn_fg = 'blue'
+        else:
+            conn_info = "🌐 Global Default: IP Dialer (TCP/Telnet)"
+            conn_fg = 'gray'
+        
+        ttk.Label(info_frame, text=conn_info, font=('Arial', 9), foreground=conn_fg).pack(anchor=tk.W)
         
         # Buttons
         button_frame = ttk.Frame(self)
@@ -1031,6 +1049,7 @@ class BBSDialDialog(tk.Toplevel):
                                 bbs.setdefault('username', '')
                                 bbs.setdefault('password', '')
                                 bbs.setdefault('send_delay', 100)
+                                bbs.setdefault('connection_mode', 'ip')
                                 valid_list.append(bbs)
                         if valid_list:
                             self.bbs_list = valid_list
@@ -1089,6 +1108,14 @@ class BBSDialDialog(tk.Toplevel):
             self.detail_labels['protocol_label'].config(text=bbs.get('protocol', 'TurboModem'))
             self.detail_labels['speed_label'].config(text=bbs.get('transfer_speed', 'normal'))
             
+            # Connection Mode anzeigen
+            conn_mode = bbs.get('connection_mode', 'ip')
+            if conn_mode == 'comport':
+                conn_text = "📡 COM-Port (ATDT)"
+            else:
+                conn_text = "🌐 IP (TCP/Telnet)"
+            self.detail_labels['connection_label'].config(text=conn_text)
+            
             # Lade Preview-Bild
             self.load_preview_image(idx)
     
@@ -1111,7 +1138,8 @@ class BBSDialDialog(tk.Toplevel):
             'password': bbs.get('password', ''),
             'send_delay': bbs.get('send_delay', 100),
             'protocol': bbs.get('protocol'),  # Protocol laden!
-            'transfer_speed': bbs.get('transfer_speed', 'normal')  # Speed Profile laden!
+            'transfer_speed': bbs.get('transfer_speed', 'normal'),  # Speed Profile laden!
+            'connection_mode': bbs.get('connection_mode', 'ip')  # Connection Mode pro BBS!
         }
         self.destroy()
 
@@ -1122,7 +1150,7 @@ class BBSEditDialog(tk.Toplevel):
     def __init__(self, parent, bbs_data):
         super().__init__(parent)
         self.title("Edit BBS Entry" if bbs_data else "New BBS Entry")
-        self.geometry("550x550")
+        self.geometry("550x640")
         self.resizable(False, False)
         self.result = None
         
@@ -1233,6 +1261,23 @@ class BBSEditDialog(tk.Toplevel):
         ttk.Label(form_frame, text="(Timing between ACK and next block)", 
                  font=('Arial', 8, 'italic')).grid(row=row+1, column=0, columnspan=2, sticky=tk.W)
         
+        # Connection Mode
+        row += 2
+        ttk.Separator(form_frame, orient='horizontal').grid(row=row, column=0, columnspan=2, sticky='ew', pady=10)
+        
+        row += 1
+        ttk.Label(form_frame, text="Connection:", font=('Arial', 10, 'bold')).grid(row=row, column=0, sticky=tk.W, pady=5)
+        
+        current_conn = bbs_data.get('connection_mode', 'ip') if bbs_data else 'ip'
+        self.conn_mode_var = tk.StringVar(value=current_conn)
+        
+        conn_combo = ttk.Combobox(form_frame, textvariable=self.conn_mode_var, 
+                                  values=['ip', 'comport'], state='readonly', width=18)
+        conn_combo.grid(row=row, column=1, pady=5, sticky=tk.W)
+        
+        ttk.Label(form_frame, text="🌐 ip = TCP/Telnet  |  📡 comport = ATDT via Serial", 
+                 font=('Arial', 8, 'italic')).grid(row=row+1, column=0, columnspan=2, sticky=tk.W)
+        
         # Buttons
         button_frame = ttk.Frame(self)
         button_frame.pack(pady=10)
@@ -1303,7 +1348,8 @@ class BBSEditDialog(tk.Toplevel):
             'password': self.password_var.get(),  # Nicht trimmen!
             'send_delay': delay,
             'protocol': self.protocol_var.get(),  # Transfer Protocol!
-            'transfer_speed': self.speed_var.get()  # Transfer Speed Profile!
+            'transfer_speed': self.speed_var.get(),  # Transfer Speed Profile!
+            'connection_mode': self.conn_mode_var.get()  # Connection Mode!
         }
         
         self.destroy()
@@ -1447,6 +1493,86 @@ class SettingsDialog(tk.Toplevel):
         ttk.Label(folders_frame, text="💡 Leave empty to be asked each time", 
                  font=('Arial', 8, 'italic')).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
         
+        # ========== CONNECTION MODE (COM-Port / IP) ==========
+        conn_frame = ttk.LabelFrame(right_col, text="Connection Mode", padding=10)
+        conn_frame.pack(fill=tk.X, pady=5)
+        
+        current_conn_mode = parent.settings.get('connection_mode', 'ip')
+        self.conn_mode_var = tk.StringVar(value=current_conn_mode)
+        
+        ttk.Radiobutton(conn_frame, text="IP Dialer (TCP/Telnet)", 
+                        variable=self.conn_mode_var, value='ip',
+                        command=self._on_conn_mode_change).pack(anchor=tk.W)
+        ttk.Radiobutton(conn_frame, text="COM-Port (tcpser/com0com)", 
+                        variable=self.conn_mode_var, value='comport',
+                        command=self._on_conn_mode_change).pack(anchor=tk.W)
+        
+        # COM-Port Details Frame (nur sichtbar wenn comport gewählt)
+        self.comport_details = ttk.Frame(conn_frame)
+        self.comport_details.pack(fill=tk.X, pady=(5, 0))
+        
+        # COM-Port Auswahl
+        port_row = ttk.Frame(self.comport_details)
+        port_row.pack(fill=tk.X, pady=2)
+        ttk.Label(port_row, text="Port:", font=('Arial', 9, 'bold')).pack(side=tk.LEFT)
+        
+        # Verfügbare COM-Ports ermitteln
+        available_ports = get_available_comports()
+        port_names = [f"{p.device} - {p.description}" for p in available_ports]
+        port_devices = [p.device for p in available_ports]
+        
+        current_port = parent.settings.get('serial_port', '')
+        self.comport_var = tk.StringVar(value=current_port)
+        
+        if port_names:
+            self.comport_combo = ttk.Combobox(port_row, textvariable=self.comport_var,
+                                               values=port_devices, state='readonly', width=18)
+        else:
+            self.comport_combo = ttk.Combobox(port_row, textvariable=self.comport_var,
+                                               values=['(no ports found)'], state='readonly', width=18)
+        self.comport_combo.pack(side=tk.LEFT, padx=5)
+        
+        # Refresh Button
+        ttk.Button(port_row, text="🔄", command=self._refresh_comports, width=3).pack(side=tk.LEFT)
+        
+        # Port-Beschreibung
+        self.port_desc_var = tk.StringVar(value="")
+        self.port_desc_label = ttk.Label(self.comport_details, textvariable=self.port_desc_var,
+                                          font=('Arial', 8, 'italic'), foreground='gray')
+        self.port_desc_label.pack(anchor=tk.W, pady=(2, 0))
+        self.comport_combo.bind('<<ComboboxSelected>>', self._on_port_selected)
+        
+        # Baudrate
+        baud_row = ttk.Frame(self.comport_details)
+        baud_row.pack(fill=tk.X, pady=2)
+        ttk.Label(baud_row, text="Baud:", font=('Arial', 9)).pack(side=tk.LEFT)
+        
+        current_baud = str(parent.settings.get('serial_baudrate', 9600))
+        self.baud_var = tk.StringVar(value=current_baud)
+        baud_combo = ttk.Combobox(baud_row, textvariable=self.baud_var,
+                                   values=['300', '1200', '2400', '4800', '9600', '19200', '38400', '57600', '115200'],
+                                   state='readonly', width=10)
+        baud_combo.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Label(self.comport_details, text="📡 Dial: ATDT host:port", 
+                 font=('Arial', 8, 'italic')).pack(anchor=tk.W, pady=(3, 0))
+        ttk.Label(self.comport_details, text="💡 Works with tcpser, com0com, etc.", 
+                 font=('Arial', 8, 'italic')).pack(anchor=tk.W)
+        
+        if not HAS_SERIAL:
+            ttk.Label(self.comport_details, text="⚠️ pyserial not installed! pip install pyserial", 
+                     font=('Arial', 8, 'bold'), foreground='red').pack(anchor=tk.W, pady=(3, 0))
+        
+        # Zeige/Verstecke COM-Port Details basierend auf aktuellem Modus
+        self._on_conn_mode_change()
+        
+        # Setze Beschreibung für aktuell ausgewählten Port
+        if current_port and available_ports:
+            for p in available_ports:
+                if p.device == current_port:
+                    self.port_desc_var.set(p.description)
+                    break
+        
         # Save Button
         btn_frame = ttk.Frame(self)
         btn_frame.pack(pady=15)
@@ -1458,14 +1584,45 @@ class SettingsDialog(tk.Toplevel):
         # Calculate optimal size
         self.update_idletasks()
         
-        # Set geometry - wider layout, adequate height
-        self.geometry("620x680")
+        # Set geometry - wider layout, adequate height (etwas höher wegen COM-Port)
+        self.geometry("620x780")
         
         # Center dialog
         self.update_idletasks()
         x = parent.winfo_x() + (parent.winfo_width() // 2) - (self.winfo_width() // 2)
         y = parent.winfo_y() + (parent.winfo_height() // 2) - (self.winfo_height() // 2)
         self.geometry(f"+{x}+{y}")
+        self.geometry(f"+{x}+{y}")
+    
+    def _on_conn_mode_change(self):
+        """Zeigt/Versteckt COM-Port Details basierend auf Connection Mode"""
+        if self.conn_mode_var.get() == 'comport':
+            self.comport_details.pack(fill=tk.X, pady=(5, 0))
+        else:
+            self.comport_details.pack_forget()
+    
+    def _refresh_comports(self):
+        """Aktualisiert die Liste verfügbarer COM-Ports"""
+        available_ports = get_available_comports()
+        port_devices = [p.device for p in available_ports]
+        
+        if port_devices:
+            self.comport_combo['values'] = port_devices
+        else:
+            self.comport_combo['values'] = ['(no ports found)']
+            self.comport_var.set('')
+        
+        self.port_desc_var.set(f"Found {len(available_ports)} port(s)")
+    
+    def _on_port_selected(self, event=None):
+        """Zeigt Beschreibung des ausgewählten Ports"""
+        selected = self.comport_var.get()
+        available_ports = get_available_comports()
+        for p in available_ports:
+            if p.device == selected:
+                self.port_desc_var.set(p.description)
+                return
+        self.port_desc_var.set("")
     
     def browse_upload_folder(self):
         """Select Upload Folder"""
@@ -1500,6 +1657,12 @@ class SettingsDialog(tk.Toplevel):
     def save(self):
         for proto in TransferProtocol:
             if proto.value == self.proto_var.get():
+                # Baudrate validieren
+                try:
+                    baudrate = int(self.baud_var.get())
+                except ValueError:
+                    baudrate = 9600
+                
                 self.result = {
                     'protocol': proto, 
                     'width': self.width_var.get(),
@@ -1507,7 +1670,10 @@ class SettingsDialog(tk.Toplevel):
                     'download_folder': self.download_folder_var.get(),
                     'transfer_speed': self.speed_var.get(),
                     'swap_zy': self.swap_zy_var.get(),
-                    'transfer_debug': self.transfer_debug_var.get()
+                    'transfer_debug': self.transfer_debug_var.get(),
+                    'connection_mode': self.conn_mode_var.get(),
+                    'serial_port': self.comport_var.get(),
+                    'serial_baudrate': baudrate
                 }
                 break
         self.destroy()
@@ -3276,35 +3442,57 @@ class HotkeyEditDialog(tk.Toplevel):
 
 
 class ServerPortDialog(tk.Toplevel):
-    """Simple dialog asking for the server listen port"""
+    """Dialog asking for server mode type: TCP port or COM port"""
     
     def __init__(self, parent, default_port=64128):
         super().__init__(parent)
         self.title("Server Mode")
-        self.geometry("340x150")
+        self.geometry("400x250")
         self.resizable(False, False)
-        self.result = None
+        self.result = None       # TCP port number (int) or None
+        self.mode = None         # 'tcp' or 'comport' or None
         
         # Content
         frame = ttk.Frame(self, padding=20)
         frame.pack(fill=tk.BOTH, expand=True)
         
-        ttk.Label(frame, text="Listen Port:", font=('Arial', 11)).pack(anchor=tk.W)
+        ttk.Label(frame, text="Server Mode - Listen on:", font=('Arial', 11, 'bold')).pack(anchor=tk.W)
         
+        # Radio buttons for mode selection
+        self.mode_var = tk.StringVar(value='tcp')
+        
+        tcp_frame = ttk.Frame(frame)
+        tcp_frame.pack(fill=tk.X, pady=(10, 0))
+        ttk.Radiobutton(tcp_frame, text="🌐 TCP/IP Port:", variable=self.mode_var, 
+                        value='tcp', command=self._on_mode_change).pack(side=tk.LEFT)
         self.port_var = tk.StringVar(value=str(default_port))
-        self.port_entry = ttk.Entry(frame, textvariable=self.port_var, font=('Arial', 12), width=10)
-        self.port_entry.pack(anchor=tk.W, pady=(5, 15))
-        self.port_entry.select_range(0, tk.END)
-        self.port_entry.focus_set()
+        self.port_entry = ttk.Entry(tcp_frame, textvariable=self.port_var, font=('Arial', 12), width=8)
+        self.port_entry.pack(side=tk.LEFT, padx=(5, 0))
+        
+        comport_frame = ttk.Frame(frame)
+        comport_frame.pack(fill=tk.X, pady=(8, 0))
+        serial_port = parent.serial_port if hasattr(parent, 'serial_port') else ''
+        serial_baud = parent.serial_baudrate if hasattr(parent, 'serial_baudrate') else 9600
+        self.comport_label = f"📡 COM Port: {serial_port} @ {serial_baud} baud" if serial_port else "📡 COM Port: (not configured)"
+        ttk.Radiobutton(comport_frame, text=self.comport_label, variable=self.mode_var, 
+                        value='comport', command=self._on_mode_change).pack(side=tk.LEFT)
+        
+        # Info label
+        self.info_var = tk.StringVar(value="Listens for incoming TCP connections")
+        ttk.Label(frame, textvariable=self.info_var, font=('Arial', 9), 
+                 foreground='gray').pack(anchor=tk.W, pady=(10, 0))
         
         # Buttons
         btn_frame = ttk.Frame(frame)
-        btn_frame.pack(fill=tk.X)
+        btn_frame.pack(fill=tk.X, pady=(15, 0))
         ttk.Button(btn_frame, text="Start", command=self.on_ok, width=10).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(btn_frame, text="Cancel", command=self.destroy, width=10).pack(side=tk.LEFT)
         
         self.bind('<Return>', lambda e: self.on_ok())
         self.bind('<Escape>', lambda e: self.destroy())
+        
+        self.port_entry.select_range(0, tk.END)
+        self.port_entry.focus_set()
         
         self.transient(parent)
         self.grab_set()
@@ -3315,16 +3503,32 @@ class ServerPortDialog(tk.Toplevel):
         y = parent.winfo_y() + (parent.winfo_height() // 2) - (self.winfo_height() // 2)
         self.geometry(f"+{x}+{y}")
     
+    def _on_mode_change(self):
+        mode = self.mode_var.get()
+        if mode == 'tcp':
+            self.port_entry.config(state='normal')
+            self.info_var.set("Listens for incoming TCP connections")
+        else:
+            self.port_entry.config(state='disabled')
+            self.info_var.set("Waits for RING on COM port, answers with ATA")
+    
     def on_ok(self):
-        try:
-            port = int(self.port_var.get().strip())
-            if not (1 <= port <= 65535):
-                raise ValueError
-            self.result = port
+        mode = self.mode_var.get()
+        if mode == 'tcp':
+            try:
+                port = int(self.port_var.get().strip())
+                if not (1 <= port <= 65535):
+                    raise ValueError
+                self.result = port
+                self.mode = 'tcp'
+                self.destroy()
+            except ValueError:
+                messagebox.showwarning("Invalid Port", 
+                    "Please enter a valid port number (1-65535).", parent=self)
+        else:
+            self.mode = 'comport'
+            self.result = 0  # Not used for comport
             self.destroy()
-        except ValueError:
-            messagebox.showwarning("Invalid Port", 
-                "Please enter a valid port number (1-65535).", parent=self)
 
 
 class ServerClientAdapter:
@@ -3494,6 +3698,293 @@ class ServerConnectionWrapper:
         self.client.close()
 
 
+class SerialClientAdapter:
+    """Adapter für serielle COM-Port Verbindungen (tcpser, com0com, etc.).
+    Mimics the telnet_client interface:
+    - has_received_data(), get_received_data(timeout), get_received_data_raw(size, timeout)
+    - send_raw(data) -> returns True on success
+    - send_bytes(data), send_key(byte_val)
+    - clear_receive_buffer()
+    - settimeout(timeout)
+    - connected, receive_queue
+    
+    Zwei Zustände:
+    - port_open: COM-Port ist geöffnet (ser.is_open) - kann AT-Befehle senden
+    - connected: ATDT war erfolgreich, Datenverbindung steht - recv_thread läuft
+    
+    Sendet AT-Befehle (ATDT host:port) über den COM-Port und liest Daten."""
+    
+    def __init__(self, port, baudrate=9600, timeout_val=1):
+        if not HAS_SERIAL:
+            raise ImportError("pyserial nicht installiert! pip install pyserial")
+        
+        self.port_name = port
+        self.baudrate = baudrate
+        self.ser = serial.Serial(port, baudrate, timeout=timeout_val)
+        self.port_open = True  # Port ist offen, aber noch nicht "connected" (kein ATDT)
+        self.connected = False
+        self.receive_queue = queue.Queue()
+        self._recv_lock = threading.Lock()
+        self._transfer_mode = False
+        self._recv_thread = None
+        self._dial_complete = False
+    
+    def dial(self, host, port):
+        """Sendet ATDT host:port über den COM-Port und wartet auf CONNECT.
+        Kann mehrfach aufgerufen werden (nach hangup) auf dem gleichen offenen Port."""
+        # Sicherstellen dass recv_thread vom letzten Mal gestoppt ist
+        if self._recv_thread and self._recv_thread.is_alive():
+            self.connected = False
+            self._recv_thread.join(timeout=2)
+            self._recv_thread = None
+        
+        # Buffer leeren vor neuem Dial
+        self.clear_receive_buffer()
+        
+        at_cmd = f"ATDT {host}:{port}\r"
+        debug_print(f"[SERIAL] Sending: {at_cmd.strip()}")
+        self.ser.write(at_cmd.encode('ascii'))
+        
+        # Warte auf Antwort (CONNECT, BUSY, NO CARRIER, ERROR, etc.)
+        response = ""
+        start_time = time.time()
+        timeout = 30  # 30 Sekunden Timeout für Dial
+        
+        while time.time() - start_time < timeout:
+            if self.ser.in_waiting > 0:
+                chunk = self.ser.read(self.ser.in_waiting)
+                response += chunk.decode('ascii', errors='ignore')
+                debug_print(f"[SERIAL] Response: {response.strip()}")
+                
+                # Prüfe auf bekannte Antworten
+                resp_upper = response.upper()
+                if 'CONNECT' in resp_upper:
+                    debug_print(f"[SERIAL] Connected!")
+                    self.connected = True
+                    self._dial_complete = True
+                    # Starte Receive-Thread
+                    self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+                    self._recv_thread.start()
+                    return True
+                elif any(err in resp_upper for err in ['NO CARRIER', 'BUSY', 'ERROR', 'NO DIALTONE', 'NO ANSWER']):
+                    debug_print(f"[SERIAL] Dial failed: {response.strip()}")
+                    return False
+            else:
+                time.sleep(0.05)
+        
+        debug_print(f"[SERIAL] Dial timeout after {timeout}s")
+        return False
+    
+    def hangup(self):
+        """Nur Hangup (+++ATH), Port bleibt offen. Für Wiederverwendung nach disconnect."""
+        was_connected = self.connected
+        self.connected = False
+        
+        # Warte bis recv_thread stoppt
+        if self._recv_thread and self._recv_thread.is_alive():
+            self._recv_thread.join(timeout=2)
+        self._recv_thread = None
+        self._dial_complete = False
+        
+        if was_connected and self.ser.is_open:
+            try:
+                time.sleep(0.5)
+                self.ser.write(b'+++')
+                time.sleep(1.5)
+                self.ser.write(b'ATH\r')
+                time.sleep(0.5)
+                # Antwort lesen und verwerfen
+                if self.ser.in_waiting > 0:
+                    resp = self.ser.read(self.ser.in_waiting)
+                    debug_print(f"[SERIAL] Hangup response: {resp}")
+            except Exception as e:
+                debug_print(f"[SERIAL] Hangup error: {e}")
+        
+        # Buffer leeren
+        self.clear_receive_buffer()
+    
+    def send_at_command(self, command):
+        """Sendet einen beliebigen AT-Befehl und gibt die Antwort zurück"""
+        self.ser.write(f"{command}\r".encode('ascii'))
+        time.sleep(0.5)
+        response = ""
+        while self.ser.in_waiting > 0:
+            chunk = self.ser.read(self.ser.in_waiting)
+            response += chunk.decode('ascii', errors='ignore')
+            time.sleep(0.05)
+        return response.strip()
+    
+    def _recv_loop(self):
+        """Background thread: read from serial port into queue.
+        Erkennt auch 'NO CARRIER' von tcpser als Disconnect."""
+        self._no_carrier_buf = b''  # Buffer für NO CARRIER Erkennung
+        while self.connected:
+            if self._transfer_mode:
+                time.sleep(0.05)
+                continue
+            try:
+                if self.ser.in_waiting > 0:
+                    data = self.ser.read(self.ser.in_waiting)
+                    if data:
+                        # Prüfe auf NO CARRIER (tcpser sendet das wenn TCP-Verbindung getrennt)
+                        self._no_carrier_buf += data
+                        # Nur die letzten 30 Bytes prüfen
+                        if len(self._no_carrier_buf) > 100:
+                            self._no_carrier_buf = self._no_carrier_buf[-50:]
+                        
+                        if b'NO CARRIER' in self._no_carrier_buf:
+                            debug_print("[SERIAL] NO CARRIER detected - remote disconnect")
+                            self.connected = False
+                            # Daten vor NO CARRIER noch in Queue stellen
+                            idx = data.find(b'NO CARRIER')
+                            if idx > 0:
+                                self.receive_queue.put(data[:idx])
+                            break
+                        
+                        self.receive_queue.put(data)
+                else:
+                    time.sleep(0.01)
+            except (serial.SerialException, OSError):
+                self.connected = False
+                break
+    
+    def set_transfer_mode(self, active):
+        """Pause/resume the recv thread so FileTransfer can read directly"""
+        self._transfer_mode = active
+        if active:
+            time.sleep(0.1)
+    
+    def settimeout(self, timeout):
+        """Set serial timeout"""
+        try:
+            self.ser.timeout = timeout
+        except:
+            pass
+    
+    def has_received_data(self):
+        return not self.receive_queue.empty()
+    
+    def get_received_data(self, timeout=0.1):
+        """Get data from queue with optional timeout."""
+        try:
+            return self.receive_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+    
+    def get_received_data_raw(self, size, timeout=3):
+        """Blocking read of exactly size bytes from serial port."""
+        result = bytearray()
+        end_time = time.time() + timeout
+        old_timeout = self.ser.timeout
+        
+        try:
+            while len(result) < size and time.time() < end_time:
+                remaining = end_time - time.time()
+                if remaining <= 0:
+                    break
+                self.ser.timeout = min(remaining, 1.0)
+                chunk = self.ser.read(size - len(result))
+                if chunk:
+                    result.extend(chunk)
+        except (serial.SerialException, OSError):
+            self.connected = False
+        finally:
+            try:
+                self.ser.timeout = old_timeout
+            except:
+                pass
+        
+        return bytes(result) if result else None
+    
+    def clear_receive_buffer(self):
+        """Discard all queued received data"""
+        while not self.receive_queue.empty():
+            try:
+                self.receive_queue.get_nowait()
+            except queue.Empty:
+                break
+        # Auch den Serial-Buffer leeren
+        try:
+            if self.ser.in_waiting > 0:
+                self.ser.read(self.ser.in_waiting)
+        except:
+            pass
+    
+    def send_raw(self, data):
+        """Send raw bytes over serial. Returns True on success.
+        Funktioniert auch wenn connected=False, solange der Port offen ist (für AT-Befehle)."""
+        if not self.ser.is_open:
+            return False
+        try:
+            if isinstance(data, (bytes, bytearray)):
+                self.ser.write(data)
+            else:
+                self.ser.write(data.encode('latin-1'))
+            return True
+        except (serial.SerialException, OSError):
+            self.connected = False
+            self.port_open = False
+            return False
+    
+    def send_bytes(self, data):
+        """Send multiple bytes"""
+        return self.send_raw(data)
+    
+    def send_key(self, byte_val):
+        """Send a single byte"""
+        return self.send_raw(bytes([byte_val]))
+    
+    def close(self):
+        """Close serial connection completely (Port wird geschlossen)"""
+        # Erst hangup wenn verbunden
+        if self.connected:
+            self.hangup()
+        else:
+            self.connected = False
+            # recv_thread stoppen
+            if self._recv_thread and self._recv_thread.is_alive():
+                self._recv_thread.join(timeout=2)
+            self._recv_thread = None
+        
+        self.port_open = False
+        try:
+            self.ser.close()
+        except:
+            pass
+
+
+class SerialConnectionWrapper:
+    """Lightweight wrapper that mimics BBSConnection for serial mode"""
+    
+    def __init__(self, serial_adapter):
+        self.client = serial_adapter
+        self.config = {'host': 'serial', 'port': 0}
+    
+    def send_key(self, petscii_byte):
+        """Send a single PETSCII byte"""
+        self.client.send_raw(bytes([petscii_byte]))
+    
+    def send_raw(self, data):
+        """Send raw bytes"""
+        self.client.send_raw(data)
+    
+    def send_bytes(self, data):
+        """Send multiple bytes"""
+        self.client.send_bytes(data)
+    
+    def disconnect(self):
+        """Disconnect serial"""
+        self.client.close()
+
+
+def get_available_comports():
+    """Gibt Liste verfügbarer COM-Ports zurück"""
+    if not HAS_SERIAL:
+        return []
+    ports = serial.tools.list_ports.comports()
+    return sorted(ports, key=lambda p: p.device)
+
+
 class BBSTerminal(tk.Tk):
     """Hauptanwendung mit allen Features"""
     
@@ -3570,9 +4061,19 @@ class BBSTerminal(tk.Tk):
         
         # Server Mode State
         self.server_mode = False
+        self.server_mode_type = None  # 'tcp' or 'comport'
         self.server_socket = None
         self.server_thread = None
         self.server_port = 64128  # Default port
+        
+        # COM-Port / Serial Mode State
+        self.connection_mode = self.settings.get('connection_mode', 'ip')  # 'ip' oder 'comport'
+        self.serial_port = self.settings.get('serial_port', '')
+        self.serial_baudrate = self.settings.get('serial_baudrate', 9600)
+        self.serial_adapter = None  # SerialClientAdapter Instance
+        
+        # Local Echo
+        self.local_echo = self.settings.get('local_echo', False)
         
         # Screen Buffer
         self.screen = PETSCIIScreenBuffer(self.screen_width, self.screen_height)
@@ -3635,7 +4136,7 @@ class BBSTerminal(tk.Tk):
         status_frame.pack(fill=tk.X, side=tk.BOTTOM)
         
         # Status Text (links)
-        self.status_var = tk.StringVar(value="Not connected | F7=Dial F9=Login F1=Upload F3=Download F5=Settings")
+        self.status_var = tk.StringVar(value="Not connected | F7=Dial F9=Login F5=Settings Alt+C=COM Port")
         ttk.Label(status_frame, textvariable=self.status_var, relief=tk.SUNKEN).pack(side=tk.LEFT, fill=tk.X, expand=True)
         
         # Column Mode (rechts)
@@ -3648,13 +4149,22 @@ class BBSTerminal(tk.Tk):
         self.config(menu=menubar)
         
         # File
-        file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=file_menu)
-        file_menu.add_command(label="Connect (F7)", command=self.show_dial_dialog)
-        file_menu.add_command(label="Auto-Login (F9)", command=self.send_auto_login)
-        file_menu.add_command(label="Disconnect", command=self.disconnect)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.quit)
+        self.file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=self.file_menu)
+        self.file_menu.add_command(label="Connect (F7)", command=self.show_dial_dialog)
+        self.file_menu.add_command(label="Auto-Login (F9)", command=self.send_auto_login)
+        self.file_menu.add_command(label="Disconnect", command=self.disconnect)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="Open COM Port (Alt+C)", command=self.open_comport)
+        self.file_menu.add_command(label="Close COM Port", command=self.close_comport, state=tk.DISABLED)
+        self.file_menu.add_separator()
+        
+        # Echo On/Off
+        self.echo_var = tk.BooleanVar(value=self.local_echo)
+        self.file_menu.add_checkbutton(label="Local Echo (Alt+E)", variable=self.echo_var, 
+                                  command=self.toggle_echo)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="Exit", command=self.quit)
         
         # Transfer
         transfer_menu = tk.Menu(menubar, tearoff=0)
@@ -3709,6 +4219,10 @@ class BBSTerminal(tk.Tk):
         self.bind("<Alt-P>", lambda e: self.cycle_protocol())  # Protocol wechseln (Shift)
         self.bind("<Alt-s>", lambda e: self.take_screenshot())  # Screenshot
         self.bind("<Alt-S>", lambda e: self.take_screenshot())  # Screenshot (Shift)
+        self.bind("<Alt-e>", lambda e: self._toggle_echo_hotkey())  # Echo Toggle
+        self.bind("<Alt-E>", lambda e: self._toggle_echo_hotkey())  # Echo Toggle (Shift)
+        self.bind("<Alt-c>", lambda e: self.toggle_comport())  # COM Port Toggle
+        self.bind("<Alt-C>", lambda e: self.toggle_comport())  # COM Port Toggle (Shift)
         self.bind("<F12>", lambda e: self.toggle_traffic_logger())
         
         # Traffic Logger State
@@ -3776,9 +4290,10 @@ class BBSTerminal(tk.Tk):
         
         filepath = filedialog.askopenfilename(
             parent=self,  # self IST root (BBSTerminal erbt von tk.Tk)
-            title="Select file to send (Latin-1 text)",
+            title="Select file to send",
             initialdir=initial_dir,
             filetypes=[
+                ("Text/SEQ files", "*.txt *.seq"),
                 ("Text files", "*.txt"),
                 ("SEQ files", "*.seq"),
                 ("All files", "*.*")
@@ -3788,12 +4303,10 @@ class BBSTerminal(tk.Tk):
             return
         
         try:
-            # Lade Datei als Latin-1
-            with open(filepath, 'r', encoding='latin-1') as f:
-                content = f.read()
-            
-            # Konvertiere zu Bytes
-            data = content.encode('latin-1')
+            # Lade Datei als Binary (wichtig für SEQ/PETSCII Dateien!)
+            # Text-Modus würde Newlines konvertieren
+            with open(filepath, 'rb') as f:
+                data = f.read()
             
             # Zeige Info
             filename = os.path.basename(filepath)
@@ -3820,8 +4333,11 @@ class BBSTerminal(tk.Tk):
                 
                 debug_print(f"Sending file: {filename} ({len(data)} bytes)")
                 
-                # Sende Byte für Byte mit kleiner Verzögerung
-                for i, byte in enumerate(data):
+                # Sende in Chunks für bessere Performance
+                CHUNK_SIZE = 256  # Bytes pro Chunk
+                total_sent = 0
+                
+                for offset in range(0, len(data), CHUNK_SIZE):
                     # Check Cancel
                     if progress.cancelled:
                         debug_print("Send cancelled by user")
@@ -3831,19 +4347,20 @@ class BBSTerminal(tk.Tk):
                         debug_print("Connection lost - stopping send")
                         break
                     
-                    self.bbs_connection.send_key(byte)
-                    if not self.transfer_active:
-                        self.scrollback.add_bytes([byte])
+                    # Hole nächsten Chunk
+                    chunk = data[offset:offset + CHUNK_SIZE]
                     
-                    # Update Progress alle 100 Bytes
-                    if i % 100 == 0:
-                        status = f"Sending {filename}"
-                        progress.after(0, lambda d=i+1, t=len(data), s=status: 
-                                     progress.update_progress(d, t, s))
+                    # Sende Chunk auf einmal
+                    self.bbs_connection.send_raw(chunk)
+                    total_sent += len(chunk)
                     
-                    # Kleine Verzögerung alle 10 Bytes um BBS nicht zu überlasten
-                    if i % 10 == 0:
-                        time.sleep(0.01)  # 10ms
+                    # Update Progress
+                    status = f"Sending {filename}"
+                    progress.after(0, lambda d=total_sent, t=len(data), s=status: 
+                                 progress.update_progress(d, t, s))
+                    
+                    # Kleine Pause zwischen Chunks damit Empfänger mitkommt
+                    time.sleep(0.02)  # 20ms
                 
                 # Finale Update
                 def finish():
@@ -3852,14 +4369,14 @@ class BBSTerminal(tk.Tk):
                         if not progress.cancelled:
                             progress.destroy()
                             
-                            if i == len(data) - 1:  # Komplett gesendet
+                            if total_sent == len(data):  # Komplett gesendet
                                 debug_print(f"File sent: {len(data)} bytes")
                                 messagebox.showinfo("Send Complete", 
                                     f"File sent successfully!\n"
                                     f"File: {filename}\n"
                                     f"Size: {len(data):,} bytes")
                             else:
-                                debug_print(f"Send incomplete: {i+1}/{len(data)} bytes")
+                                debug_print(f"Send incomplete: {total_sent}/{len(data)} bytes")
                         else:
                             progress.destroy()
                             debug_print("Send cancelled")
@@ -3876,9 +4393,47 @@ class BBSTerminal(tk.Tk):
             import traceback
             traceback.print_exc()
     
+    def _handle_comport_keypress(self, event):
+        """Tasten direkt an offenen COM-Port senden (AT-Befehl Modus).
+        Sendet ASCII (nicht PETSCII). Echo kommt von tcpser selbst (ATE1)."""
+        # Modifier-Tasten ignorieren
+        if event.keysym in ('Control_L', 'Control_R', 'Alt_L', 'Alt_R', 
+                            'Shift_L', 'Shift_R', 'Caps_Lock', 'Num_Lock',
+                            'F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12'):
+            return
+        
+        # Return → CR senden
+        if event.keysym == 'Return':
+            byte_to_send = b'\r'
+        # Backspace / Delete
+        elif event.keysym in ('BackSpace', 'Delete'):
+            byte_to_send = b'\x08'
+        # Escape
+        elif event.keysym == 'Escape':
+            byte_to_send = b'\x1b'
+        # Normale druckbare Zeichen
+        elif event.char and len(event.char) == 1 and ord(event.char) >= 32:
+            byte_to_send = event.char.encode('ascii', errors='ignore')
+        else:
+            return
+        
+        if byte_to_send:
+            try:
+                self.serial_adapter.ser.write(byte_to_send)
+                # KEIN Local Echo hier - tcpser sendet Echo selbst (ATE1)
+                # Antworten werden im update_loop Polling gelesen und angezeigt
+                debug_print(f"[COMPORT AT] Sent: {byte_to_send!r}")
+            except Exception as e:
+                debug_print(f"[COMPORT AT] Send error: {e}")
+        
+        return "break"
+    
     def on_key_press(self, event):
         """Tastatur-Handler mit terminal.map Unterstützung"""
         if not self.connected:
+            # COM-Port offen aber nicht connected → AT-Befehle direkt senden
+            if self.serial_adapter and hasattr(self.serial_adapter, 'ser') and self.serial_adapter.ser.is_open:
+                return self._handle_comport_keypress(event)
             return
         
         # WICHTIG: Während Transfer KEINE Tastatur-Eingaben senden!
@@ -3969,8 +4524,8 @@ class BBSTerminal(tk.Tk):
                 self.log_traffic("SEND", petscii_byte)
                 self.bbs_connection.send_key(petscii_byte)
                 self.scrollback.add_bytes([petscii_byte])
-                # Server Mode: Local Echo
-                if self.server_mode:
+                # Local Echo (Server Mode oder Echo ON)
+                if self.server_mode or self.local_echo:
                     self.parser.parse_bytes(bytes([petscii_byte]))
             return "break"
         
@@ -3992,8 +4547,8 @@ class BBSTerminal(tk.Tk):
             self.bbs_connection.send_key(petscii_code)
             self.scrollback.add_bytes([petscii_code])
             
-            # Server Mode: Local Echo
-            if self.server_mode:
+            # Local Echo (Server Mode oder Echo ON)
+            if self.server_mode or self.local_echo:
                 self.parser.parse_bytes(bytes([petscii_code]))
             
             return "break"
@@ -4010,7 +4565,8 @@ class BBSTerminal(tk.Tk):
                 dialog.result.get('password', ''),
                 dialog.result.get('send_delay', 100),
                 dialog.result.get('protocol'),  # Protocol laden!
-                dialog.result.get('transfer_speed')  # Transfer Speed laden!
+                dialog.result.get('transfer_speed'),  # Transfer Speed laden!
+                dialog.result.get('connection_mode', 'ip')  # Connection Mode!
             )
     
     def show_upload(self):
@@ -4878,6 +5434,42 @@ class BBSTerminal(tk.Tk):
                 
                 # Wechsle Width dynamisch
                 self.switch_column_mode(new_width)
+            
+            # Connection Mode (IP / COM-Port) speichern
+            if 'connection_mode' in dialog.result:
+                old_mode = self.settings.get('connection_mode', 'ip')
+                new_mode = dialog.result['connection_mode']
+                if old_mode != new_mode:
+                    self.connection_mode = new_mode
+                    self.settings['connection_mode'] = new_mode
+                    self.save_config()
+                    debug_print(f"Connection mode changed: {old_mode} → {new_mode}")
+            
+            if 'serial_port' in dialog.result:
+                self.serial_port = dialog.result['serial_port']
+                self.settings['serial_port'] = dialog.result['serial_port']
+                self.save_config()
+            
+            if 'serial_baudrate' in dialog.result:
+                self.serial_baudrate = dialog.result['serial_baudrate']
+                self.settings['serial_baudrate'] = dialog.result['serial_baudrate']
+                self.save_config()
+    
+    def toggle_echo(self):
+        """Toggle Local Echo on/off"""
+        self.local_echo = self.echo_var.get()
+        self.settings['local_echo'] = self.local_echo
+        self.save_config()
+        state = "ON" if self.local_echo else "OFF"
+        debug_print(f"Local Echo: {state}")
+        # Update Statusbar kurz
+        if self.connected:
+            self.update_status_connected(f"Echo {state}")
+    
+    def _toggle_echo_hotkey(self):
+        """Alt+E - Toggle Echo via Hotkey"""
+        self.echo_var.set(not self.echo_var.get())
+        self.toggle_echo()
     
     def show_scrollback(self):
         """F4 - Buffer Viewer"""
@@ -4949,7 +5541,7 @@ class BBSTerminal(tk.Tk):
     # ================================================================
     
     def start_server_mode(self):
-        """Start Server Mode - ask for port and listen for incoming connections"""
+        """Start Server Mode - ask for TCP port or COM port and listen"""
         if self.server_mode:
             messagebox.showinfo("Server Mode", "Server is already running!", parent=self)
             return
@@ -4959,13 +5551,54 @@ class BBSTerminal(tk.Tk):
                 "Please disconnect from the current BBS first.", parent=self)
             return
         
-        # Ask for listen port
+        # Ask for server mode type (TCP or COM port)
         dialog = ServerPortDialog(self, self.server_port)
         self.wait_window(dialog)
         
-        if dialog.result is None:
+        if dialog.mode is None:
             return
         
+        # ========== COM PORT SERVER MODE ==========
+        if dialog.mode == 'comport':
+            if not HAS_SERIAL:
+                messagebox.showerror("Error", "pyserial nicht installiert!\npip install pyserial", parent=self)
+                return
+            
+            if not self.serial_port:
+                messagebox.showerror("Error", 
+                    "Kein COM-Port konfiguriert!\nBitte in Settings (F5) einen COM-Port auswählen.", parent=self)
+                return
+            
+            # COM-Port öffnen wenn noch nicht offen
+            if not (self.serial_adapter and hasattr(self.serial_adapter, 'ser') and self.serial_adapter.ser.is_open):
+                try:
+                    self.serial_adapter = SerialClientAdapter(self.serial_port, self.serial_baudrate)
+                    debug_print(f"[SERVER] Opened COM port for server mode: {self.serial_port} @ {self.serial_baudrate}")
+                    self._update_comport_menu()
+                except Exception as e:
+                    messagebox.showerror("Error", f"COM-Port konnte nicht geöffnet werden:\n{e}", parent=self)
+                    return
+            
+            self.server_mode = True
+            self.server_mode_type = 'comport'  # Track server mode type
+            
+            # Update menu state
+            self.server_menu.entryconfig("Start Server Mode...", state=tk.DISABLED)
+            self.server_menu.entryconfig("Stop Server Mode", state=tk.NORMAL)
+            
+            self.status_var.set(f"Server Mode | 📡 Waiting for RING on {self.serial_port} ...")
+            debug_print(f"[SERVER] COM port server mode - waiting for RING on {self.serial_port}")
+            
+            # Show message on terminal screen
+            msg = f"\x0esERVER mODE ACTIVATED\r\x05wAITING FOR ring ON {self.serial_port} ...\r\r"
+            self.parser.parse_bytes(msg.encode('latin-1'))
+            
+            # Start RING listener thread
+            self.server_thread = threading.Thread(target=self._server_comport_ring_loop, daemon=True)
+            self.server_thread.start()
+            return
+        
+        # ========== TCP SERVER MODE (existing) ==========
         self.server_port = dialog.result
         
         # Start listening
@@ -4982,6 +5615,7 @@ class BBSTerminal(tk.Tk):
             return
         
         self.server_mode = True
+        self.server_mode_type = 'tcp'  # Track server mode type
         
         # Update menu state
         self.server_menu.entryconfig("Start Server Mode...", state=tk.DISABLED)
@@ -5006,18 +5640,25 @@ class BBSTerminal(tk.Tk):
             return
         
         self.server_mode = False
+        server_type = getattr(self, 'server_mode_type', 'tcp')
         
-        # Close server socket (will unblock accept)
-        if self.server_socket:
-            try:
-                self.server_socket.close()
-            except Exception:
-                pass
-            self.server_socket = None
+        if server_type == 'comport':
+            # COM port server mode: Port bleibt offen, nur Server-Loop stoppen
+            debug_print("[SERVER] Stopping COM port server mode")
+        else:
+            # TCP server mode: Close server socket (will unblock accept)
+            if self.server_socket:
+                try:
+                    self.server_socket.close()
+                except Exception:
+                    pass
+                self.server_socket = None
         
         # Disconnect any active server connection
         if self.connected:
             self.disconnect()
+        
+        self.server_mode_type = None
         
         # Update menu state
         self.server_menu.entryconfig("Start Server Mode...", state=tk.NORMAL)
@@ -5090,6 +5731,102 @@ class BBSTerminal(tk.Tk):
                 client_sock.close()
             except Exception:
                 pass
+
+    def _server_comport_ring_loop(self):
+        """Background thread: wait for RING on COM port, answer with ATA and connect"""
+        debug_print(f"[SERVER] COM port RING loop started on {self.serial_port}")
+        ring_buf = b''
+        
+        while self.server_mode and self.serial_adapter and self.serial_adapter.ser.is_open:
+            try:
+                # Warte auf Daten vom COM-Port
+                if self.serial_adapter.ser.in_waiting > 0:
+                    data = self.serial_adapter.ser.read(self.serial_adapter.ser.in_waiting)
+                    if data:
+                        ring_buf += data
+                        # Buffer begrenzen
+                        if len(ring_buf) > 200:
+                            ring_buf = ring_buf[-100:]
+                        
+                        # Zeige AT-Antworten auf Screen (im Main Thread)
+                        self.after(0, lambda d=data: self.parser.parse_bytes(d))
+                        
+                        # Prüfe auf RING
+                        if b'RING' in ring_buf.upper():
+                            debug_print(f"[SERVER] RING detected! Sending ATA and connecting...")
+                            ring_buf = b''
+                            
+                            # ATA senden → tcpser verbindet sofort
+                            time.sleep(0.2)
+                            self.serial_adapter.ser.write(b'ATA\r')
+                            debug_print(f"[SERVER] Sent ATA")
+                            time.sleep(0.5)
+                            
+                            # Eventuell noch die CONNECT-Antwort lesen und anzeigen
+                            if self.serial_adapter.ser.in_waiting > 0:
+                                connect_resp = self.serial_adapter.ser.read(self.serial_adapter.ser.in_waiting)
+                                if connect_resp:
+                                    self.after(0, lambda d=connect_resp: self.parser.parse_bytes(d))
+                            
+                            # Sofort verbinden
+                            self.after(0, self._server_comport_on_connect)
+                            
+                            # Warte bis Verbindung endet
+                            while self.server_mode and self.connected:
+                                time.sleep(0.2)
+                            
+                            # Zurück zum Warten auf RING
+                            if self.server_mode:
+                                self.after(0, lambda: self.status_var.set(
+                                    f"Server Mode | 📡 Waiting for RING on {self.serial_port} ..."))
+                                debug_print(f"[SERVER] Back to waiting for RING")
+                else:
+                    time.sleep(0.05)
+                    
+            except (serial.SerialException, OSError) as e:
+                debug_print(f"[SERVER] COM port error in RING loop: {e}")
+                break
+        
+        debug_print("[SERVER] COM port RING loop ended")
+    
+    def _server_comport_on_connect(self):
+        """Called on main thread when a caller connects via COM port ATA"""
+        if self.connected:
+            return
+        
+        try:
+            # Setze serial_adapter in connected-Modus
+            self.serial_adapter.connected = True
+            self.serial_adapter._dial_complete = True
+            
+            # Starte recv_thread
+            if not self.serial_adapter._recv_thread or not self.serial_adapter._recv_thread.is_alive():
+                self.serial_adapter._recv_thread = threading.Thread(
+                    target=self.serial_adapter._recv_loop, daemon=True
+                )
+                self.serial_adapter._recv_thread.start()
+            
+            # Erstelle Connection Wrapper (wie bei normalem Dial)
+            self.bbs_connection = SerialConnectionWrapper(self.serial_adapter)
+            self.connected = True
+            self._update_comport_menu()
+            
+            self.current_bbs_host = "serial"
+            self.current_bbs_port = 0
+            
+            self.status_var.set(f"Server Mode | 📡 Caller connected via {self.serial_port}")
+            debug_print(f"[SERVER] COM port caller connected, recv_thread started")
+            
+            # Sende Welcome (wie bei TCP Server Mode)
+            try:
+                welcome = f"\x0ewELCOME TO pycgms v{PYCGMS_VERSION}\r\n"
+                self.bbs_connection.send_raw(welcome.encode('latin-1'))
+                debug_print(f"[SERVER] Sent welcome via COM port")
+            except Exception as e:
+                debug_print(f"[SERVER] Could not send welcome: {e}")
+            
+        except Exception as e:
+            debug_print(f"[SERVER] Error in comport on_connect: {e}")
 
 
     def update_status(self, text):
@@ -5516,6 +6253,10 @@ class BBSTerminal(tk.Tk):
                     # Defaults für fehlende Keys
                     config.setdefault('screen_width', 40)
                     config.setdefault('transfer_debug', False)
+                    config.setdefault('connection_mode', 'ip')
+                    config.setdefault('serial_port', '')
+                    config.setdefault('serial_baudrate', 9600)
+                    config.setdefault('local_echo', False)
                     return config
         except:
             pass
@@ -5523,7 +6264,11 @@ class BBSTerminal(tk.Tk):
             'screen_width': 40,
             'default_host': 'the-hidden.hopto.org',
             'default_port': 64128,
-            'transfer_debug': False
+            'transfer_debug': False,
+            'connection_mode': 'ip',
+            'serial_port': '',
+            'serial_baudrate': 9600,
+            'local_echo': False
         }
     
     def save_config(self):
@@ -5877,15 +6622,86 @@ class BBSTerminal(tk.Tk):
         
         return None
     
-    def connect_bbs(self, host, port, username="", password="", send_delay=100, protocol=None, transfer_speed=None):
-        """Verbindet mit BBS"""
+    def open_comport(self):
+        """Öffnet den COM-Port und hält ihn offen (für com0com/tcpser Workflow).
+        Der Port bleibt offen bis close_comport() aufgerufen wird.
+        Beim Dial wird dann ATDT über den bereits offenen Port gesendet."""
+        if not HAS_SERIAL:
+            messagebox.showerror("Error", "pyserial nicht installiert!\npip install pyserial")
+            return False
+        
+        if not self.serial_port:
+            messagebox.showerror("Error", "Kein COM-Port konfiguriert!\nBitte in Settings (F5) einen COM-Port auswählen.")
+            return False
+        
+        # Bereits offen?
+        if self.serial_adapter and hasattr(self.serial_adapter, 'ser') and self.serial_adapter.ser.is_open:
+            debug_print(f"[COMPORT] Already open: {self.serial_port}")
+            messagebox.showinfo("COM Port", f"{self.serial_port} ist bereits geöffnet.")
+            return True
+        
         try:
-            config = {
-                'host': host,
-                'port': port,
-                'encoding': 'petscii'
-            }
-            
+            self.serial_adapter = SerialClientAdapter(
+                self.serial_port,
+                self.serial_baudrate
+            )
+            debug_print(f"[COMPORT] Opened {self.serial_port} @ {self.serial_baudrate} baud")
+            self.status_var.set(f"📡 COM Port: {self.serial_port} @ {self.serial_baudrate} baud (open) | F7=Dial")
+            self._update_comport_menu()
+            return True
+        except Exception as e:
+            self.serial_adapter = None
+            messagebox.showerror("Error", f"COM-Port konnte nicht geöffnet werden:\n{e}")
+            self.status_var.set(f"COM Port Error: {e}")
+            return False
+    
+    def close_comport(self):
+        """Schließt den COM-Port. Trennt vorher eine aktive Verbindung."""
+        if not self.serial_adapter:
+            debug_print("[COMPORT] No COM port open")
+            return
+        
+        # Falls verbunden, erst disconnect
+        if self.connected:
+            self.disconnect()
+        
+        try:
+            # Nur den seriellen Port schließen, kein ATH/+++ nötig wenn nicht connected
+            self.serial_adapter.connected = False
+            try:
+                self.serial_adapter.ser.close()
+            except:
+                pass
+            debug_print(f"[COMPORT] Closed {self.serial_port}")
+        except Exception as e:
+            debug_print(f"[COMPORT] Error closing: {e}")
+        
+        self.serial_adapter = None
+        self.status_var.set("COM Port closed | F7=Dial F5=Settings")
+        self._update_comport_menu()
+    
+    def _update_comport_menu(self):
+        """Aktualisiert den Open/Close COM Port Menüeintrag"""
+        try:
+            if self.serial_adapter and hasattr(self.serial_adapter, 'ser') and self.serial_adapter.ser.is_open:
+                self.file_menu.entryconfig("Open COM Port (Alt+C)", state=tk.DISABLED)
+                self.file_menu.entryconfig("Close COM Port", state=tk.NORMAL)
+            else:
+                self.file_menu.entryconfig("Open COM Port (Alt+C)", state=tk.NORMAL)
+                self.file_menu.entryconfig("Close COM Port", state=tk.DISABLED)
+        except Exception:
+            pass  # Menu items might not exist yet
+    
+    def toggle_comport(self):
+        """Toggle COM Port open/close (für Hotkey Alt+C)"""
+        if self.serial_adapter and hasattr(self.serial_adapter, 'ser') and self.serial_adapter.ser.is_open:
+            self.close_comport()
+        else:
+            self.open_comport()
+    
+    def connect_bbs(self, host, port, username="", password="", send_delay=100, protocol=None, transfer_speed=None, connection_mode=None):
+        """Verbindet mit BBS - über IP oder COM-Port je nach connection_mode"""
+        try:
             # Speichere Login-Daten für F9
             self.current_bbs_username = username
             self.current_bbs_password = password
@@ -5906,6 +6722,91 @@ class BBSTerminal(tk.Tk):
             if transfer_speed:
                 self.settings['transfer_speed'] = transfer_speed
                 debug_print(f"Transfer Speed für {host}: {transfer_speed}")
+            
+            # Bestimme Connection Mode: per-BBS → global Fallback
+            effective_mode = connection_mode if connection_mode else self.connection_mode
+            debug_print(f"Connection mode: {effective_mode} (bbs={connection_mode}, global={self.connection_mode})")
+            
+            # ========== COM-PORT MODE ==========
+            if effective_mode == 'comport':
+                if not HAS_SERIAL:
+                    messagebox.showerror("Error", "pyserial nicht installiert!\npip install pyserial")
+                    return
+                
+                if not self.serial_port:
+                    messagebox.showerror("Error", "Kein COM-Port konfiguriert!\nBitte in Settings (F5) einen COM-Port auswählen.")
+                    return
+                
+                # COM-Port: Wiederverwendung wenn bereits offen, sonst neu öffnen
+                try:
+                    if self.serial_adapter and hasattr(self.serial_adapter, 'ser') and self.serial_adapter.ser.is_open:
+                        debug_print(f"[SERIAL] Reusing already open COM port: {self.serial_port}")
+                    else:
+                        debug_print(f"[SERIAL] Opening COM port: {self.serial_port}")
+                        self.serial_adapter = SerialClientAdapter(
+                            self.serial_port, 
+                            self.serial_baudrate
+                        )
+                except Exception as e:
+                    messagebox.showerror("Error", f"COM-Port konnte nicht geöffnet werden:\n{e}")
+                    return
+                
+                # Status anzeigen
+                self.status_var.set(f"📡 Dialing {host}:{port} via {self.serial_port} ({self.serial_baudrate} baud)...")
+                self.update()
+                
+                # Dial in Background-Thread (blockiert bis zu 30s!)
+                adapter = self.serial_adapter
+                _host, _port = host, port
+                _username = username
+                
+                def dial_thread():
+                    try:
+                        debug_print(f"[SERIAL] Dialing {_host}:{_port} via {self.serial_port}")
+                        if adapter.dial(_host, _port):
+                            # Erfolg → UI im Hauptthread updaten
+                            def on_connected():
+                                self.bbs_connection = SerialConnectionWrapper(adapter)
+                                self.connected = True
+                                self._update_comport_menu()
+                                
+                                # Sende Client-Identifikation
+                                try:
+                                    time.sleep(0.1)
+                                    self.bbs_connection.send_raw(f"PYCGMS {PYCGMS_VERSION}\r\n".encode())
+                                    debug_print(f"[SERIAL] Sent PYCGMS client identification")
+                                except Exception as e:
+                                    debug_print(f"[SERIAL] Could not send PYCGMS: {e}")
+                                
+                                login_info = f" (Login: {_username})" if _username else ""
+                                protocol_info = f" | Protocol: {self.current_protocol.value}"
+                                speed_info = f" | Speed: {self.settings.get('transfer_speed', 'normal')}"
+                                serial_info = f" | Serial: {self.serial_port}"
+                                self.status_var.set(f"Connected to {_host}:{_port}{login_info}{protocol_info}{speed_info}{serial_info}")
+                            self.after(0, on_connected)
+                        else:
+                            # Dial failed - Port bleibt offen
+                            def on_failed():
+                                debug_print(f"[SERIAL] Dial failed, COM port stays open")
+                                self.status_var.set(f"Dial failed | 📡 COM Port: {self.serial_port} (open) | F7=Retry")
+                                messagebox.showerror("Error", f"ATDT {_host}:{_port} failed!\n\nKeine Verbindung über {self.serial_port}.\nPrüfe ob tcpser läuft.\n\nCOM Port bleibt offen für Retry.")
+                            self.after(0, on_failed)
+                    except Exception as e:
+                        def on_error(err=e):
+                            debug_print(f"[SERIAL] Error during dial: {err}")
+                            self.status_var.set(f"Serial error | 📡 {self.serial_port}")
+                            messagebox.showerror("Error", f"COM-Port Error: {err}")
+                        self.after(0, on_error)
+                
+                threading.Thread(target=dial_thread, daemon=True).start()
+                return
+            
+            # ========== IP MODE (Standard) ==========
+            config = {
+                'host': host,
+                'port': port,
+                'encoding': 'petscii'
+            }
             
             self.bbs_connection = BBSConnection(config, self.parser)
             if self.bbs_connection.connect():
@@ -5929,12 +6830,37 @@ class BBSTerminal(tk.Tk):
             messagebox.showerror("Error", str(e))
     
     def disconnect(self):
-        """Disconnect from BBS"""
+        """Disconnect from BBS. Bei COM-Port: Nur ATH/Hangup, Port bleibt offen."""
         if self.bbs_connection:
-            self.bbs_connection.disconnect()
+            # Bei Serial-Modus: Nur Hangup, Port NICHT schließen
+            if isinstance(self.bbs_connection, SerialConnectionWrapper) and self.serial_adapter:
+                self.bbs_connection = None
+                self.connected = False
+                # Hangup in Background-Thread (blockiert wegen sleep)
+                adapter = self.serial_adapter
+                def do_hangup():
+                    adapter.hangup()
+                    debug_print(f"[SERIAL] Hangup complete, COM port stays open: {self.serial_port}")
+                threading.Thread(target=do_hangup, daemon=True).start()
+            else:
+                # IP-Modus: Normal disconnect
+                self.bbs_connection.disconnect()
+                # Serial Adapter aufräumen (nur wenn IP-Modus)
+                if self.serial_adapter:
+                    try:
+                        self.serial_adapter.close()
+                    except:
+                        pass
+                    self.serial_adapter = None
+        
         self.connected = False
-        if self.server_mode:
+        if self.server_mode and getattr(self, 'server_mode_type', None) == 'comport':
+            self.status_var.set(f"Server Mode | 📡 Waiting for RING on {self.serial_port} ...")
+        elif self.server_mode:
             self.status_var.set(f"Server Mode | Listening on port {self.server_port} ...")
+        elif self.serial_adapter and hasattr(self.serial_adapter, 'ser') and self.serial_adapter.ser.is_open:
+            # COM-Port noch offen → zeige das an
+            self.status_var.set(f"Disconnected | 📡 COM Port: {self.serial_port} (open) | F7=Dial")
         else:
             self.status_var.set("Disconnected")
     
@@ -6041,6 +6967,39 @@ class BBSTerminal(tk.Tk):
     def update_loop(self):
         """Main Update Loop"""
         try:
+            # ===== COM-Port AT-Modus: Lese Antworten von tcpser wenn Port offen aber nicht connected =====
+            if not self.connected and self.serial_adapter and hasattr(self.serial_adapter, 'ser') and self.serial_adapter.ser.is_open:
+                try:
+                    if self.serial_adapter.ser.in_waiting > 0:
+                        response = self.serial_adapter.ser.read(self.serial_adapter.ser.in_waiting)
+                        if response:
+                            # Prüfe ob CONNECT in der Antwort ist (manuelles ATDT)
+                            resp_text = response.decode('ascii', errors='ignore').upper()
+                            if 'CONNECT' in resp_text:
+                                debug_print(f"[UPDATE_LOOP] CONNECT detected from manual ATDT!")
+                                # Zeige die Antwort noch an (CONNECT-Meldung)
+                                self.parser.parse_bytes(response)
+                                # Wechsel in Connected-Modus
+                                self.serial_adapter.connected = True
+                                self.serial_adapter._dial_complete = True
+                                # Starte recv_thread wenn noch nicht läuft
+                                if not self.serial_adapter._recv_thread or not self.serial_adapter._recv_thread.is_alive():
+                                    self.serial_adapter._recv_thread = threading.Thread(
+                                        target=self.serial_adapter._recv_loop, daemon=True
+                                    )
+                                    self.serial_adapter._recv_thread.start()
+                                # Erstelle Connection Wrapper
+                                self.bbs_connection = SerialConnectionWrapper(self.serial_adapter)
+                                self.connected = True
+                                self._update_comport_menu()
+                                self.status_var.set(f"Connected via {self.serial_port} (manual ATDT) | F7=Dial")
+                                debug_print(f"[UPDATE_LOOP] Manual ATDT → connected=True, recv_thread started")
+                            else:
+                                # Normale AT-Antwort (OK, ERROR, etc.)
+                                self.parser.parse_bytes(response)
+                except Exception as e:
+                    debug_print(f"[UPDATE_LOOP] AT mode read error: {e}")
+            
             # BBS Daten verarbeiten
             if self.connected and self.bbs_connection:
                 # Während Transfer: KEINE Daten vom receive_buffer holen!
@@ -6083,10 +7042,15 @@ class BBSTerminal(tk.Tk):
                             # Nur Disconnect wenn Queue WIRKLICH leer UND Verbindung getrennt
                             if not has_more_data and not client.connected:
                                 self.connected = False
-                                if self.server_mode:
+                                if self.server_mode and getattr(self, 'server_mode_type', None) == 'comport':
+                                    self.status_var.set(f"Server Mode | 📡 Caller disconnected | Waiting for RING on {self.serial_port} ...")
+                                elif self.server_mode:
                                     self.status_var.set(f"Server Mode | Client disconnected | Listening on port {self.server_port} ...")
+                                elif self.serial_adapter and hasattr(self.serial_adapter, 'ser') and self.serial_adapter.ser.is_open:
+                                    self.status_var.set(f"Disconnected (BBS closed) | 📡 COM Port: {self.serial_port} (open) | F7=Dial")
                                 else:
                                     self.status_var.set("Disconnected (BBS closed connection)")
+                                self.bbs_connection = None
                                 debug_print("[UPDATE_LOOP] Connection closed and queue completely empty")
                     except Exception:
                         pass
