@@ -345,7 +345,7 @@ class FileTransfer:
         if isinstance(filepath, list) and len(filepath) > 1:
             if self.protocol not in [TransferProtocol.YMODEM, TransferProtocol.RAWTCP,
                                      TransferProtocol.PUNTER, TransferProtocol.PUNTER_MULTI,
-                                     TransferProtocol.TURBOMODEM]:
+                                     TransferProtocol.TURBOMODEM, TransferProtocol.ZMODEM]:
                 self.log(f"⚠ {self.protocol.value} unterstützt kein Multi-File, nehme erste Datei")
                 filepath = filepath[0]
         
@@ -375,12 +375,13 @@ class FileTransfer:
             if self.protocol == TransferProtocol.TURBOMODEM:
                 return self._turbomodem_send(filepath, callback)  # Akzeptiert String oder Liste
             
-            # Restliche Protokolle: Single-File only
+            # Restliche Protokolle: Single-File only (außer ZModem)
             if isinstance(filepath, list):
                 if len(filepath) == 0:
                     self.log("✗ ERROR: Empty file list")
                     return False
-                filepath = filepath[0]
+                if self.protocol != TransferProtocol.ZMODEM:
+                    filepath = filepath[0]
             
             if self.protocol == TransferProtocol.ZMODEM:
                 return self._zmodem_send(filepath, callback)
@@ -1797,14 +1798,18 @@ class FileTransfer:
         return True
     
     def _zmodem_send(self, filepath, callback):
-        if callback:
-            callback(0, 0, "ZModem noch nicht implementiert")
-        return False
+        """ZModem Send - Native Implementation"""
+        from zmodem import ZModemTransfer
+        zm = ZModemTransfer(self)
+        return zm.send(filepath, callback)
     
     def _zmodem_receive(self, filepath, callback):
-        if callback:
-            callback(0, "ZModem noch nicht implementiert")
-        return False
+        """ZModem Receive - Native Implementation"""
+        from zmodem import ZModemTransfer
+        zm = ZModemTransfer(self)
+        # filepath ist bei ZModem ein Verzeichnis (Dateiname kommt vom Sender)
+        save_dir = filepath if os.path.isdir(filepath) else os.path.dirname(filepath)
+        return zm.receive(save_dir, callback)
     
     # ==================================================================================
     # PUNTER C1 PROTOCOL IMPLEMENTATION
@@ -3650,8 +3655,8 @@ class FileTransfer:
                 else:
                     self.log(f"✗ TURBOMODEM MULTI-SEND FEHLGESCHLAGEN ({files_sent} von {len(filepath)} gesendet)")
             else:
-                # Single-File: send_file() verwenden
-                success = turbo.send_file(filepath, callback)
+                # Single-File: auch über send_files() für Direct Socket + Streaming
+                success, files_sent = turbo.send_files([filepath], callback)
                 
                 if success:
                     bps, duration = turbo.get_speed()

@@ -7,7 +7,7 @@ import time
 import os
 import socket
 import queue
-from PIL import ImageTk
+from PIL import Image, ImageTk
 
 # Serial port support (optional)
 try:
@@ -801,7 +801,9 @@ class BBSDialDialog(tk.Toplevel):
                 hotkey = "-"
             
             username_info = f" [{bbs.get('username', '')}]" if bbs.get('username') else ""
-            self.listbox.insert(tk.END, f"[{hotkey}] {bbs['name']:20s} {bbs['host']}:{bbs['port']}{username_info}")
+            emu = bbs.get('emulation', 'C64 40col')
+            emu_short = {'C64 40col': 'C64', 'C64 80col': 'C128', 'Amiga 80col': 'AMIGA'}.get(emu, emu)
+            self.listbox.insert(tk.END, f"[{hotkey}] {bbs['name']:20s} {bbs['host']}:{bbs['port']}{username_info}  ({emu_short})")
     
     def on_click(self, event):
         """Einzelklick - Wählt Eintrag aus und zeigt Details"""
@@ -1050,6 +1052,7 @@ class BBSDialDialog(tk.Toplevel):
                                 bbs.setdefault('password', '')
                                 bbs.setdefault('send_delay', 100)
                                 bbs.setdefault('connection_mode', 'ip')
+                                bbs.setdefault('emulation', 'C64 40col')
                                 valid_list.append(bbs)
                         if valid_list:
                             self.bbs_list = valid_list
@@ -1139,7 +1142,8 @@ class BBSDialDialog(tk.Toplevel):
             'send_delay': bbs.get('send_delay', 100),
             'protocol': bbs.get('protocol'),  # Protocol laden!
             'transfer_speed': bbs.get('transfer_speed', 'normal'),  # Speed Profile laden!
-            'connection_mode': bbs.get('connection_mode', 'ip')  # Connection Mode pro BBS!
+            'connection_mode': bbs.get('connection_mode', 'ip'),  # Connection Mode pro BBS!
+            'emulation': bbs.get('emulation', 'C64 40col')  # Emulation Mode!
         }
         self.destroy()
 
@@ -1150,7 +1154,7 @@ class BBSEditDialog(tk.Toplevel):
     def __init__(self, parent, bbs_data):
         super().__init__(parent)
         self.title("Edit BBS Entry" if bbs_data else "New BBS Entry")
-        self.geometry("550x640")
+        self.geometry("550x700")
         self.resizable(False, False)
         self.result = None
         
@@ -1232,6 +1236,7 @@ class BBSEditDialog(tk.Toplevel):
         
         protocol_options = [p.value for p in [TransferProtocol.RAWTCP,       # 🚀 MAX SPEED (LAN)
                                                TransferProtocol.TURBOMODEM,   # ⚡ ULTRA FAST!
+                                               TransferProtocol.ZMODEM,       # 📡 Standard BBS
                                                TransferProtocol.PUNTER,       # 📦 Multi-File
                                                TransferProtocol.XMODEM_1K,
                                                TransferProtocol.XMODEM_CRC, 
@@ -1276,6 +1281,21 @@ class BBSEditDialog(tk.Toplevel):
         conn_combo.grid(row=row, column=1, pady=5, sticky=tk.W)
         
         ttk.Label(form_frame, text="🌐 ip = TCP/Telnet  |  📡 comport = ATDT via Serial", 
+                 font=('Arial', 8, 'italic')).grid(row=row+1, column=0, columnspan=2, sticky=tk.W)
+        
+        # Emulation Mode
+        row += 2
+        ttk.Label(form_frame, text="Emulation:", font=('Arial', 10, 'bold')).grid(row=row, column=0, sticky=tk.W, pady=5)
+        
+        current_emu = bbs_data.get('emulation', 'C64 40col') if bbs_data else 'C64 40col'
+        self.emulation_var = tk.StringVar(value=current_emu)
+        
+        emu_combo = ttk.Combobox(form_frame, textvariable=self.emulation_var, 
+                                  values=['C64 40col', 'C64 80col', 'Amiga 80col'], 
+                                  state='readonly', width=18)
+        emu_combo.grid(row=row, column=1, pady=5, sticky=tk.W)
+        
+        ttk.Label(form_frame, text="🖥️ C64=PETSCII  |  🖥️ Amiga=ANSI/ASCII", 
                  font=('Arial', 8, 'italic')).grid(row=row+1, column=0, columnspan=2, sticky=tk.W)
         
         # Buttons
@@ -1349,7 +1369,8 @@ class BBSEditDialog(tk.Toplevel):
             'send_delay': delay,
             'protocol': self.protocol_var.get(),  # Transfer Protocol!
             'transfer_speed': self.speed_var.get(),  # Transfer Speed Profile!
-            'connection_mode': self.conn_mode_var.get()  # Connection Mode!
+            'connection_mode': self.conn_mode_var.get(),  # Connection Mode!
+            'emulation': self.emulation_var.get()  # Emulation Mode!
         }
         
         self.destroy()
@@ -1390,6 +1411,7 @@ class SettingsDialog(tk.Toplevel):
         
         for proto in [TransferProtocol.RAWTCP,
                       TransferProtocol.TURBOMODEM,
+                      TransferProtocol.ZMODEM,
                       TransferProtocol.PUNTER,
                       TransferProtocol.XMODEM_1K,
                       TransferProtocol.XMODEM_CRC, 
@@ -1400,6 +1422,8 @@ class SettingsDialog(tk.Toplevel):
         ttk.Label(proto_frame, text="🚀 RawTCP: MAX LAN Speed (~12 MB/s)!", 
                  font=('Arial', 8, 'italic')).pack(anchor=tk.W, pady=(5, 0))
         ttk.Label(proto_frame, text="⚡ TurboModem: 10-20x faster than XModem!", 
+                 font=('Arial', 8, 'italic')).pack(anchor=tk.W)
+        ttk.Label(proto_frame, text="📡 ZModem: Standard BBS protocol (auto-download)", 
                  font=('Arial', 8, 'italic')).pack(anchor=tk.W)
         ttk.Label(proto_frame, text="📦 Punter C1: Multi-File Downloads (C64 BBS)", 
                  font=('Arial', 8, 'italic')).pack(anchor=tk.W)
@@ -1432,13 +1456,48 @@ class SettingsDialog(tk.Toplevel):
                  font=('Arial', 8, 'italic')).pack(anchor=tk.W, pady=(5, 0))
         
         # Screen Width
-        width_frame = ttk.LabelFrame(left_col, text="Screen Width", padding=10)
+        width_frame = ttk.LabelFrame(left_col, text="Screen Mode", padding=10)
         width_frame.pack(fill=tk.X, pady=5)
         
+        # Mode auswahl: 40 col, 80 col, Amiga 80
         self.width_var = tk.IntVar(value=current_width)
-        ttk.Radiobutton(width_frame, text="40 Columns (C64)", variable=self.width_var, value=40).pack(anchor=tk.W)
-        ttk.Radiobutton(width_frame, text="80 Columns", variable=self.width_var, value=80).pack(anchor=tk.W)
-        ttk.Label(width_frame, text="✨ Live switch - no restart needed", font=('Arial', 8, 'italic')).pack(anchor=tk.W, pady=5)
+        ttk.Radiobutton(width_frame, text="40 Columns (C64)", variable=self.width_var, value=40,
+                        command=self._on_mode_change_width).pack(anchor=tk.W)
+        ttk.Radiobutton(width_frame, text="80 Columns (C64/C128)", variable=self.width_var, value=80,
+                        command=self._on_mode_change_width).pack(anchor=tk.W)
+        ttk.Radiobutton(width_frame, text="80 Columns (Amiga)", variable=self.width_var, value=81,
+                        command=self._on_mode_change_width).pack(anchor=tk.W)
+        
+        # Amiga Screen Height (nur bei Amiga sichtbar)
+        self.amiga_height_frame = ttk.Frame(width_frame)
+        
+        ttk.Label(self.amiga_height_frame, text="Screen Lines:", font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=(20, 5))
+        current_amiga_height = parent.settings.get('amiga_height', 25)
+        self.amiga_height_var = tk.IntVar(value=current_amiga_height)
+        height_spin = ttk.Spinbox(self.amiga_height_frame, from_=24, to=60, width=4,
+                                   textvariable=self.amiga_height_var)
+        height_spin.pack(side=tk.LEFT)
+        ttk.Label(self.amiga_height_frame, text="(24-60)", font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
+        
+        # Amiga Font Auswahl (nur bei Amiga sichtbar)
+        self.amiga_font_frame = ttk.Frame(width_frame)
+        
+        ttk.Label(self.amiga_font_frame, text="Font:", font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=(20, 5))
+        current_amiga_font = parent.settings.get('amiga_font', '')
+        self.amiga_font_var = tk.StringVar(value=current_amiga_font)
+        font_entry = ttk.Entry(self.amiga_font_frame, textvariable=self.amiga_font_var, width=30)
+        font_entry.pack(side=tk.LEFT)
+        ttk.Button(self.amiga_font_frame, text="...", width=3,
+                   command=self._browse_amiga_font).pack(side=tk.LEFT, padx=2)
+        ttk.Label(self.amiga_font_frame, text="(TTF/BMP/PNG/Raw/PSF)", font=('Arial', 8)).pack(side=tk.LEFT, padx=5)
+        
+        # Zeige Amiga-Felder nur wenn Amiga gewählt
+        if current_width == 81:
+            self.amiga_height_frame.pack(anchor=tk.W, pady=(5, 0))
+            self.amiga_font_frame.pack(anchor=tk.W, pady=(2, 0))
+        
+        ttk.Label(width_frame, text="✨ Live switch - no restart needed", font=('Arial', 8, 'italic')).pack(anchor=tk.W, pady=(5, 0))
+        ttk.Label(width_frame, text="📺 Amiga: 80 col, 24-60 lines for AmiExpress etc.", font=('Arial', 8, 'italic')).pack(anchor=tk.W, pady=(0, 5))
         
         # ========== RIGHT COLUMN ==========
         
@@ -1490,8 +1549,13 @@ class SettingsDialog(tk.Toplevel):
         download_entry.grid(row=1, column=1, padx=3, pady=2)
         ttk.Button(folders_frame, text="...", command=self.browse_download_folder, width=3).grid(row=1, column=2, pady=2)
         
-        ttk.Label(folders_frame, text="💡 Leave empty to be asked each time", 
-                 font=('Arial', 8, 'italic')).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
+        # Day folder option
+        self.day_folder_var = tk.BooleanVar(value=parent.settings.get('use_day_folders', False))
+        ttk.Checkbutton(folders_frame, text="Save to current day folder (YYYY-MM-DD)", 
+                        variable=self.day_folder_var).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
+        
+        ttk.Label(folders_frame, text="Creates date subfolder in download/upload path", 
+                 font=('Arial', 8, 'italic')).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(0, 0))
         
         # ========== CONNECTION MODE (COM-Port / IP) ==========
         conn_frame = ttk.LabelFrame(right_col, text="Connection Mode", padding=10)
@@ -1573,9 +1637,9 @@ class SettingsDialog(tk.Toplevel):
                     self.port_desc_var.set(p.description)
                     break
         
-        # Save Button
+        # Save Button — pack BEFORE geometry so it's always visible
         btn_frame = ttk.Frame(self)
-        btn_frame.pack(pady=15)
+        btn_frame.pack(side=tk.BOTTOM, pady=15)
         ttk.Button(btn_frame, text="Save", command=self.save, width=12).pack()
         
         self.transient(parent)
@@ -1584,8 +1648,8 @@ class SettingsDialog(tk.Toplevel):
         # Calculate optimal size
         self.update_idletasks()
         
-        # Set geometry - wider layout, adequate height (etwas höher wegen COM-Port)
-        self.geometry("620x780")
+        # Set geometry - wider layout, adequate height for all options
+        self.geometry("620x860")
         
         # Center dialog
         self.update_idletasks()
@@ -1623,6 +1687,33 @@ class SettingsDialog(tk.Toplevel):
                 self.port_desc_var.set(p.description)
                 return
         self.port_desc_var.set("")
+    
+    def _on_mode_change_width(self):
+        """Zeigt/Versteckt Amiga Height+Font-Eingabe basierend auf gewähltem Mode"""
+        if self.width_var.get() == 81:
+            self.amiga_height_frame.pack(anchor=tk.W, pady=(5, 0))
+            self.amiga_font_frame.pack(anchor=tk.W, pady=(2, 0))
+        else:
+            self.amiga_height_frame.pack_forget()
+            self.amiga_font_frame.pack_forget()
+    
+    def _browse_amiga_font(self):
+        """Datei-Browser für Amiga Font"""
+        filepath = filedialog.askopenfilename(
+            parent=self,
+            title="Select Amiga Font",
+            filetypes=[
+                ("Font files", "*.ttf *.otf *.bmp *.png *.psf *.fnt *.font *.raw"),
+                ("TrueType fonts", "*.ttf *.otf"),
+                ("Bitmap fonts", "*.bmp *.png"),
+                ("PSF fonts", "*.psf"),
+                ("Raw fonts", "*.raw *.fnt *.bin"),
+                ("Amiga fonts", "*.font"),
+                ("All files", "*.*")
+            ]
+        )
+        if filepath:
+            self.amiga_font_var.set(filepath)
     
     def browse_upload_folder(self):
         """Select Upload Folder"""
@@ -1666,8 +1757,11 @@ class SettingsDialog(tk.Toplevel):
                 self.result = {
                     'protocol': proto, 
                     'width': self.width_var.get(),
+                    'amiga_height': max(24, min(60, self.amiga_height_var.get())),
+                    'amiga_font': self.amiga_font_var.get().strip(),
                     'upload_folder': self.upload_folder_var.get(),
                     'download_folder': self.download_folder_var.get(),
+                    'use_day_folders': self.day_folder_var.get(),
                     'transfer_speed': self.speed_var.get(),
                     'swap_zy': self.swap_zy_var.get(),
                     'transfer_debug': self.transfer_debug_var.get(),
@@ -3550,6 +3644,12 @@ class ServerClientAdapter:
         self.socket = sock  # Alias - FileTransfer uses self.connection.socket
         self.sock.setblocking(True)
         self.sock.settimeout(None)
+        # Disable Nagle algorithm — critical for ZModem upload!
+        # We buffer data ourselves and need it sent as-is, not split into fragments
+        try:
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except:
+            pass
         self.connected = True
         self.receive_queue = queue.Queue()
         self._recv_lock = threading.Lock()
@@ -3567,9 +3667,9 @@ class ServerClientAdapter:
                 time.sleep(0.05)
                 continue
             try:
-                readable, _, _ = select.select([self.sock], [], [], 0.05)
+                readable, _, _ = select.select([self.sock], [], [], 0.02)
                 if readable:
-                    data = self.sock.recv(4096)
+                    data = self.sock.recv(32768)
                     if data:
                         self.receive_queue.put(data)
                     else:
@@ -4021,6 +4121,23 @@ class BBSTerminal(tk.Tk):
         self.current_zoom = 4  # Starte mit höherem Zoom
         self.fullscreen = False  # Fullscreen-Status
         
+        # Amiga 80 Column Mode: screen_width 81 in config → actual 80 cols + variable height
+        if self.screen_width == 81:
+            self.screen_width = 80
+            self.amiga_mode = True
+            self.screen_height = max(24, min(60, self.settings.get('amiga_height', 25)))
+        else:
+            self.amiga_mode = False
+        
+        # Fenster-Geometrie und Zoom anpassen
+        if self.amiga_mode:
+            # Amiga: Größeres Fenster, update_zoom passt Zoom an
+            self.geometry("1320x880")
+            self.current_zoom = 2
+            self.title(f"PYCGMS V{PYCGMS_VERSION} [Amiga 80x{self.screen_height}]")
+        else:
+            self.geometry("1320x880")
+        
         # Keyboard Layout Einstellung laden und aktivieren
         swap_zy = self.settings.get('swap_zy', False)
         from c64_keyboard import set_swap_zy
@@ -4077,15 +4194,22 @@ class BBSTerminal(tk.Tk):
         
         # Screen Buffer
         self.screen = PETSCIIScreenBuffer(self.screen_width, self.screen_height)
-        self.parser = PETSCIIParser(self.screen)
         
-        # Renderer
-        self.renderer = AnimatedC64ROMFontRenderer(
-            self.screen,
-            font_upper_path="upper.bmp",
-            font_lower_path="lower.bmp",
-            zoom=self.current_zoom
-        )
+        # Parser + Renderer: Amiga → ANSI/ASCII, C64 → PETSCII
+        if self.amiga_mode:
+            from ansi_parser import ANSIParser
+            from amiga_renderer import AmigaFontRenderer
+            self.parser = ANSIParser(self.screen)
+            self.renderer = AmigaFontRenderer(self.screen, zoom=self.current_zoom,
+                                               font_path=self.settings.get('amiga_font', '') or None)
+        else:
+            self.parser = PETSCIIParser(self.screen)
+            self.renderer = AnimatedC64ROMFontRenderer(
+                self.screen,
+                font_upper_path="upper.bmp",
+                font_lower_path="lower.bmp",
+                zoom=self.current_zoom
+            )
         
         # UI erstellen
         self.create_ui()
@@ -4140,8 +4264,11 @@ class BBSTerminal(tk.Tk):
         ttk.Label(status_frame, textvariable=self.status_var, relief=tk.SUNKEN).pack(side=tk.LEFT, fill=tk.X, expand=True)
         
         # Column Mode (rechts)
-        self.column_var = tk.StringVar(value=f"{self.screen_width} COL")
-        ttk.Label(status_frame, textvariable=self.column_var, relief=tk.SUNKEN, width=8).pack(side=tk.RIGHT)
+        if self.amiga_mode:
+            self.column_var = tk.StringVar(value=f"80x{self.screen_height} AMIGA")
+        else:
+            self.column_var = tk.StringVar(value=f"{self.screen_width} COL")
+        ttk.Label(status_frame, textvariable=self.column_var, relief=tk.SUNKEN, width=14).pack(side=tk.RIGHT)
     
     def create_menu(self):
         """Erstellt Menü"""
@@ -4287,6 +4414,8 @@ class BBSTerminal(tk.Tk):
         
         # Nutze Upload Ordner aus Settings (falls gesetzt)
         initial_dir = self.settings.get('upload_folder', None)
+        if initial_dir:
+            initial_dir = self.get_day_folder(initial_dir, for_upload=True)
         
         filepath = filedialog.askopenfilename(
             parent=self,  # self IST root (BBSTerminal erbt von tk.Tk)
@@ -4308,19 +4437,61 @@ class BBSTerminal(tk.Tk):
             with open(filepath, 'rb') as f:
                 data = f.read()
             
-            # Zeige Info
+            # Zeige Info mit PETSCII Option
             filename = os.path.basename(filepath)
-            result = messagebox.askokcancel(
-                "Send File",
-                f"Send file: {filename}\n"
-                f"Size: {len(data):,} bytes\n"
-                f"Encoding: Latin-1\n\n"
-                f"The file will be sent byte-by-byte to the BBS.\n"
-                f"Continue?"
-            )
             
-            if not result:
+            # Custom dialog with PETSCII checkbox
+            dialog = tk.Toplevel(self)
+            dialog.title("Send File")
+            dialog.transient(self)
+            dialog.grab_set()
+            dialog.resizable(False, False)
+            
+            ttk.Label(dialog, text=f"Send file: {filename}", font=('Arial', 10, 'bold')).pack(padx=20, pady=(15,5))
+            ttk.Label(dialog, text=f"Size: {len(data):,} bytes").pack(padx=20)
+            ttk.Label(dialog, text=f"The file will be sent byte-by-byte to the BBS.").pack(padx=20, pady=(10,5))
+            
+            petscii_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(dialog, text="Send File PETSCII inverted (swap upper/lower case)", 
+                          variable=petscii_var).pack(padx=20, pady=10, anchor=tk.W)
+            
+            send_result = [False]
+            
+            def do_send():
+                send_result[0] = True
+                dialog.destroy()
+            
+            def do_cancel():
+                dialog.destroy()
+            
+            btn_frame = ttk.Frame(dialog)
+            btn_frame.pack(pady=(5, 15))
+            ttk.Button(btn_frame, text="Send", command=do_send, width=10).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame, text="Cancel", command=do_cancel, width=10).pack(side=tk.LEFT, padx=5)
+            
+            # Center
+            dialog.update_idletasks()
+            x = self.winfo_x() + (self.winfo_width() // 2) - (dialog.winfo_width() // 2)
+            y = self.winfo_y() + (self.winfo_height() // 2) - (dialog.winfo_height() // 2)
+            dialog.geometry(f"+{x}+{y}")
+            
+            dialog.wait_window()
+            
+            if not send_result[0]:
                 return
+            
+            # PETSCII case swap: swap upper/lower case (A-Z ↔ a-z)
+            if petscii_var.get():
+                swapped = bytearray()
+                for b in data:
+                    if 0x41 <= b <= 0x5A:      # A-Z → a-z
+                        swapped.append(b + 0x20)
+                    elif 0x61 <= b <= 0x7A:    # a-z → A-Z
+                        swapped.append(b - 0x20)
+                    else:
+                        swapped.append(b)
+                data = bytes(swapped)
+                debug_print(f"PETSCII inverted: swapped upper/lower case")
             
             # Progress Dialog
             self.transfer_active = True
@@ -4529,7 +4700,70 @@ class BBSTerminal(tk.Tk):
                     self.parser.parse_bytes(bytes([petscii_byte]))
             return "break"
         
-        # 2. DANN: Standard C64 Keyboard Mapping
+        # ============================================================
+        # AMIGA MODE: Sende ASCII/Latin-1 direkt (keine PETSCII-Konvertierung)
+        # ============================================================
+        if self.amiga_mode:
+            ascii_byte = None
+            
+            # Return → CR
+            if event.keysym == 'Return':
+                ascii_byte = 0x0D
+            # Backspace
+            elif event.keysym == 'BackSpace':
+                ascii_byte = 0x08
+            # Delete
+            elif event.keysym == 'Delete':
+                ascii_byte = 0x7F
+            # Escape
+            elif event.keysym == 'Escape':
+                ascii_byte = 0x1B
+            # Tab
+            elif event.keysym == 'Tab':
+                ascii_byte = 0x09
+            # Arrow keys → ANSI escape sequences
+            elif event.keysym == 'Up':
+                self.bbs_connection.send_raw(b'\x1b[A')
+                self.scrollback.add_bytes(b'\x1b[A')
+                self.log_traffic("SEND", b'\x1b[A')
+                return "break"
+            elif event.keysym == 'Down':
+                self.bbs_connection.send_raw(b'\x1b[B')
+                self.scrollback.add_bytes(b'\x1b[B')
+                self.log_traffic("SEND", b'\x1b[B')
+                return "break"
+            elif event.keysym == 'Right':
+                self.bbs_connection.send_raw(b'\x1b[C')
+                self.scrollback.add_bytes(b'\x1b[C')
+                self.log_traffic("SEND", b'\x1b[C')
+                return "break"
+            elif event.keysym == 'Left':
+                self.bbs_connection.send_raw(b'\x1b[D')
+                self.scrollback.add_bytes(b'\x1b[D')
+                self.log_traffic("SEND", b'\x1b[D')
+                return "break"
+            # Printable ASCII/Latin-1
+            elif event.char and len(event.char) == 1 and ord(event.char) >= 32:
+                ascii_byte = ord(event.char)
+            # Ctrl+Letter → Control codes 0x01-0x1A
+            elif ctrl and event.keysym.isalpha() and len(event.keysym) == 1:
+                ascii_byte = ord(event.keysym.upper()) - 64  # A=1, B=2, ...
+            
+            if ascii_byte is not None:
+                self.log_traffic("SEND", ascii_byte)
+                self.bbs_connection.send_key(ascii_byte)
+                self.scrollback.add_bytes([ascii_byte])
+                if self.server_mode or self.local_echo:
+                    self.parser.parse_bytes(bytes([ascii_byte]))
+                return "break"
+            
+            return  # Unbekannte Taste im Amiga-Modus ignorieren
+        
+        # ============================================================
+        # C64/C128 MODE: Standard PETSCII Keyboard Mapping
+        # ============================================================
+        
+        # 2. Standard C64 Keyboard Mapping
         # Ctrl+Nummer: Nutze keysym wenn char leer ist
         if ctrl and not event.char and event.keysym in '0123456789':
             debug_print(f"  Using keysym for Ctrl+{event.keysym}")
@@ -4566,7 +4800,8 @@ class BBSTerminal(tk.Tk):
                 dialog.result.get('send_delay', 100),
                 dialog.result.get('protocol'),  # Protocol laden!
                 dialog.result.get('transfer_speed'),  # Transfer Speed laden!
-                dialog.result.get('connection_mode', 'ip')  # Connection Mode!
+                dialog.result.get('connection_mode', 'ip'),  # Connection Mode!
+                dialog.result.get('emulation')  # Emulation Mode!
             )
     
     def show_upload(self):
@@ -4577,6 +4812,8 @@ class BBSTerminal(tk.Tk):
         
         # Nutze Upload Ordner aus Settings (falls gesetzt)
         initial_dir = self.settings.get('upload_folder', None)
+        if initial_dir:
+            initial_dir = self.get_day_folder(initial_dir, for_upload=True)
         
         # MULTI-FILE SELECTION aktiviert!
         filepaths = filedialog.askopenfilenames(  # ← "askopenfilenames" mit 's'!
@@ -4652,6 +4889,8 @@ class BBSTerminal(tk.Tk):
         )
         
         def upload_thread():
+          try:
+            print(f"### UPLOAD THREAD STARTED: protocol={upload_protocol}, filepath={filepath} ###")
             import time
             import os
             from file_transfer import TransferSpeed
@@ -4770,6 +5009,15 @@ class BBSTerminal(tk.Tk):
                         messagebox.showerror("Error", "Upload failed!")
             
             self.after(0, finish)
+          except Exception as e:
+            import traceback
+            print(f"### UPLOAD THREAD CRASH: {e} ###")
+            traceback.print_exc()
+            self.transfer_active = False
+            try:
+                self.after(0, lambda: progress.destroy())
+            except:
+                pass
         
         threading.Thread(target=upload_thread, daemon=True).start()
     
@@ -4787,9 +5035,12 @@ class BBSTerminal(tk.Tk):
             # Script-Root (wo run_terminal.py liegt)
             download_dir = os.path.dirname(os.path.abspath(__file__))
         
+        # Day folder subfolder if enabled
+        download_dir = self.get_day_folder(download_dir, for_upload=False)
+        
         # YModem, TurboModem, Punter, High-Speed oder XModem
         if self.current_protocol in [TransferProtocol.YMODEM, TransferProtocol.TURBOMODEM, TransferProtocol.PUNTER,
-                                     TransferProtocol.RAWTCP]:
+                                     TransferProtocol.RAWTCP, TransferProtocol.ZMODEM]:
             # Diese Protokolle verwalten Dateinamen selbst
             filepath = download_dir
             temp_filepath = None  # Kein temp file - Protokoll setzt finalen Namen
@@ -4837,8 +5088,15 @@ class BBSTerminal(tk.Tk):
             received_filename = None  # YModem Filename wenn vorhanden
             received_header_names = []  # Liste der vom BBS empfangenen Dateinamen
             
-            def callback(done, total, status, filename=None, **kwargs):
+            def callback(done, total_or_status=None, status=None, filename=None, **kwargs):
                 nonlocal final_bytes, final_status, received_filename, received_header_names
+                
+                # ZModem calls with (done, status), others with (done, total, status)
+                if status is None:
+                    status = total_or_status if isinstance(total_or_status, str) else ""
+                    total = total_or_status if isinstance(total_or_status, (int, float)) else 0
+                else:
+                    total = total_or_status or 0
                 
                 final_bytes = done if done > final_bytes else final_bytes
                 final_status = status
@@ -5338,7 +5596,9 @@ class BBSTerminal(tk.Tk):
     
     def show_settings(self):
         """F5 - Settings"""
-        dialog = SettingsDialog(self, self.current_protocol, self.screen_width)
+        # Übergebe width als config-value: 81 für Amiga, sonst screen_width
+        settings_width = 81 if self.amiga_mode else self.screen_width
+        dialog = SettingsDialog(self, self.current_protocol, settings_width)
         self.wait_window(dialog)
         
         if dialog.result:
@@ -5378,6 +5638,11 @@ class BBSTerminal(tk.Tk):
                 self.settings['download_folder'] = dialog.result['download_folder']
                 self.save_config()
                 debug_print(f"Download folder: {dialog.result['download_folder']}")
+            
+            if 'use_day_folders' in dialog.result:
+                self.settings['use_day_folders'] = dialog.result['use_day_folders']
+                self.save_config()
+                debug_print(f"Use day folders: {dialog.result['use_day_folders']}")
             
             # Transfer Speed Profile speichern
             if 'transfer_speed' in dialog.result:
@@ -5425,15 +5690,37 @@ class BBSTerminal(tk.Tk):
                     state = "enabled" if new_debug else "disabled"
                     print(f"Transfer debug mode {state}")
             
+            # Amiga Height speichern
+            if 'amiga_height' in dialog.result:
+                self.settings['amiga_height'] = dialog.result['amiga_height']
+                self.save_config()
+            
+            # Amiga Font speichern + live reload
+            if 'amiga_font' in dialog.result:
+                new_font = dialog.result['amiga_font']
+                old_font = self.settings.get('amiga_font', '')
+                self.settings['amiga_font'] = new_font
+                self.save_config()
+                
+                # Live Font-Wechsel wenn im Amiga-Modus
+                if self.amiga_mode and new_font != old_font and hasattr(self.renderer, 'change_font'):
+                    self.renderer.change_font(new_font or None)
+                    self.render_display()
+                    debug_print(f"Amiga font changed to: {new_font or 'Builtin Topaz'}")
+            
             # Width ändern - DYNAMISCH ohne Neustart!
             new_width = dialog.result['width']
-            if new_width != self.screen_width:
+            new_amiga_height = dialog.result.get('amiga_height', 25)
+            # Vergleiche: Amiga mode (81) vs current state
+            current_config_width = 81 if self.amiga_mode else self.screen_width
+            current_amiga_height = self.screen_height if self.amiga_mode else 25
+            if new_width != current_config_width or (new_width == 81 and new_amiga_height != current_amiga_height):
                 # Speichere in Config
                 self.settings['screen_width'] = new_width
                 self.save_config()
                 
                 # Wechsle Width dynamisch
-                self.switch_column_mode(new_width)
+                self.switch_column_mode(new_width, new_amiga_height)
             
             # Connection Mode (IP / COM-Port) speichern
             if 'connection_mode' in dialog.result:
@@ -5473,60 +5760,343 @@ class BBSTerminal(tk.Tk):
     
     def show_scrollback(self):
         """F4 - Buffer Viewer"""
-        ScrollbackViewer(self, self.scrollback, self.screen_width)
+        ScrollbackViewer(self, self.scrollback, self.screen_width, 
+                         amiga_mode=self.amiga_mode,
+                         amiga_font=self.settings.get('amiga_font', '') or None)
     
-    def switch_column_mode(self, new_width):
-        """Wechselt Column-Mode dynamisch ohne Neustart"""
-        old_width = self.screen_width
+    def _zmodem_auto_receive(self):
+        """ZModem Auto-Download: Automatisch starten wenn ZRQINIT erkannt"""
+        if self.transfer_active or not self.connected:
+            return
         
-        debug_print(f"Switching column mode: {old_width} → {new_width}")
+        debug_print("[ZMODEM] Starting auto-download...")
         
-        # Update Width
-        self.screen_width = new_width
+        # Download-Verzeichnis
+        download_dir = self.settings.get('download_folder', None)
+        if not download_dir:
+            download_dir = os.path.dirname(os.path.abspath(__file__))
         
-        # Erstelle neuen Screen Buffer mit neuer Width
-        from petscii_parser import PETSCIIScreenBuffer, PETSCIIParser
-        self.screen = PETSCIIScreenBuffer(self.screen_width, self.screen_height)
-        self.parser = PETSCIIParser(self.screen)
+        self.transfer_active = True
+        transfer_debug = self.settings.get('transfer_debug', False)
+        progress = TransferProgressDialog(self, "ZModem Download", is_upload=False,
+                                          show_file_list=False, punter_debug=transfer_debug,
+                                          is_punter=False,
+                                          bbs_connection=self.bbs_connection)
         
-        # Erstelle neuen Renderer mit neuer Width
-        from c64_rom_renderer import AnimatedC64ROMFontRenderer
-        self.renderer = AnimatedC64ROMFontRenderer(
-            self.screen,
-            font_upper_path="upper.bmp",
-            font_lower_path="lower.bmp",
-            zoom=self.current_zoom
+        def zmodem_thread():
+            import time
+            from file_transfer import FileTransfer, TransferProtocol, TransferSpeed
+            
+            speed_name = self.settings.get('transfer_speed', 'normal')
+            try:
+                speed_profile = TransferSpeed(speed_name)
+            except ValueError:
+                speed_profile = TransferSpeed.NORMAL
+            
+            log_dir = download_dir
+            transfer = FileTransfer(self.bbs_connection.client, TransferProtocol.ZMODEM, 
+                                    speed_profile, log_dir=log_dir, debug=transfer_debug)
+            progress.file_transfer = transfer
+            transfer.set_live_callback(progress.live_update)
+            
+            start_time = time.time()
+            
+            def callback(done, total=0, status=""):
+                if progress.cancelled:
+                    transfer.cancel()
+                    return
+                # Rate-limit GUI updates to max 5/sec
+                current_time = time.time()
+                if not hasattr(callback, 'last_update'):
+                    callback.last_update = 0
+                    callback.pending = None
+                if current_time - callback.last_update < 0.2:
+                    return
+                callback.last_update = current_time
+                # Store latest data — main thread polls it
+                callback.pending = (done, total, status)
+            
+            callback.last_update = 0
+            callback.pending = None
+            
+            # Poll from main thread instead of after(0) from worker
+            def poll_progress():
+                if callback.pending:
+                    d, t, s = callback.pending
+                    callback.pending = None
+                    try:
+                        progress.update_progress(d, t, s)
+                    except Exception:
+                        pass
+                if self.transfer_active:
+                    try:
+                        progress.after(200, poll_progress)
+                    except Exception:
+                        pass
+            
+            try:
+                progress.after(200, poll_progress)
+            except Exception:
+                pass
+            
+            try:
+                success = transfer.receive_file(download_dir, callback)
+                elapsed = time.time() - start_time
+                
+                def on_complete():
+                    self.transfer_active = False
+                    try:
+                        if success:
+                            debug_print(f"[ZMODEM] Download complete in {elapsed:.1f}s")
+                            progress.update_progress(0, 0, f"✓ ZModem download complete ({elapsed:.1f}s)")
+                            # Auto-close after 2 seconds
+                            progress.after(2000, lambda: progress.destroy() if progress.winfo_exists() else None)
+                        else:
+                            progress.update_progress(0, 0, "✗ ZModem download failed")
+                            progress.after(3000, lambda: progress.destroy() if progress.winfo_exists() else None)
+                    except Exception:
+                        try:
+                            progress.destroy()
+                        except:
+                            pass
+                
+                self.transfer_active = False  # Stop poll_progress loop
+                try:
+                    progress.after(100, on_complete)
+                except Exception:
+                    self.transfer_active = False
+                
+            except Exception as e:
+                debug_print(f"[ZMODEM] Auto-receive error: {e}")
+                import traceback
+                traceback.print_exc()
+                self.transfer_active = False
+        
+        import threading
+        t = threading.Thread(target=zmodem_thread, daemon=True)
+        t.start()
+    
+    def _zmodem_auto_send(self):
+        """ZModem Auto-Upload: Opens file selector when ZRINIT detected from BBS"""
+        if self.transfer_active or not self.connected:
+            return
+        
+        debug_print("[ZMODEM] Auto-send: opening file selector...")
+        
+        # Open file selector (must be in main thread - we ARE in main thread via after())
+        initial_dir = self.settings.get('upload_folder', None)
+        filepaths = filedialog.askopenfilenames(
+            parent=self,
+            title="ZModem Upload - Select file(s)",
+            initialdir=initial_dir,
+            filetypes=[
+                ("All Files", "*.*"),
+                ("LHA Archives", "*.lha"),
+                ("C64 Programs", "*.prg"),
+            ]
         )
         
-        # Update Column-Anzeige in Statusbar
-        self.column_var.set(f"{new_width} COL")
+        if not filepaths:
+            debug_print("[ZMODEM] Auto-send: cancelled by user")
+            return
         
-        # Lade Startup Screen NUR wenn NICHT verbunden
-        if not self.connected:
+        filepaths = list(filepaths)
+        
+        self.transfer_active = True
+        transfer_debug = self.settings.get('transfer_debug', False)
+        progress = TransferProgressDialog(self, "ZModem Upload", is_upload=True,
+                                          show_file_list=False, punter_debug=transfer_debug,
+                                          is_punter=False,
+                                          bbs_connection=self.bbs_connection)
+        
+        def zmodem_send_thread():
+            import time
+            from file_transfer import FileTransfer, TransferProtocol, TransferSpeed
+            
+            speed_name = self.settings.get('transfer_speed', 'normal')
+            try:
+                speed_profile = TransferSpeed(speed_name)
+            except ValueError:
+                speed_profile = TransferSpeed.NORMAL
+            
+            download_dir = self.settings.get('download_folder', os.path.dirname(os.path.abspath(__file__)))
+            transfer = FileTransfer(self.bbs_connection.client, TransferProtocol.ZMODEM,
+                                    speed_profile, log_dir=download_dir, debug=transfer_debug)
+            progress.file_transfer = transfer
+            
+            start_time = time.time()
+            
+            def callback(done, total=0, status=""):
+                if progress.cancelled:
+                    transfer.cancel()
+                    return
+                current_time = time.time()
+                if not hasattr(callback, 'last_update'):
+                    callback.last_update = 0
+                    callback.pending = None
+                if current_time - callback.last_update < 0.2:
+                    return
+                callback.last_update = current_time
+                callback.pending = (done, total, status)
+            
+            callback.last_update = 0
+            callback.pending = None
+            
+            def poll_progress():
+                if callback.pending:
+                    d, t, s = callback.pending
+                    callback.pending = None
+                    try:
+                        progress.update_progress(d, t, s)
+                    except Exception:
+                        pass
+                if self.transfer_active:
+                    try:
+                        progress.after(200, poll_progress)
+                    except Exception:
+                        pass
+            
+            try:
+                progress.after(200, poll_progress)
+            except Exception:
+                pass
+            
+            try:
+                success = transfer.send_file(filepaths if len(filepaths) > 1 else filepaths[0], callback)
+                elapsed = time.time() - start_time
+                
+                def on_complete():
+                    self.transfer_active = False
+                    try:
+                        if success:
+                            debug_print(f"[ZMODEM] Upload complete in {elapsed:.1f}s")
+                            progress.update_progress(0, 0, f"✓ ZModem upload complete ({elapsed:.1f}s)")
+                            progress.after(2000, lambda: progress.destroy() if progress.winfo_exists() else None)
+                        else:
+                            progress.update_progress(0, 0, "✗ ZModem upload failed")
+                            progress.after(3000, lambda: progress.destroy() if progress.winfo_exists() else None)
+                    except Exception:
+                        try:
+                            progress.destroy()
+                        except:
+                            pass
+                
+                self.transfer_active = False
+                try:
+                    progress.after(100, on_complete)
+                except Exception:
+                    self.transfer_active = False
+                
+            except Exception as e:
+                debug_print(f"[ZMODEM] Auto-send error: {e}")
+                import traceback
+                traceback.print_exc()
+                self.transfer_active = False
+        
+        import threading
+        t = threading.Thread(target=zmodem_send_thread, daemon=True)
+        t.start()
+    
+    def switch_column_mode(self, new_width, amiga_height=25, silent=False):
+        """Wechselt Column-Mode dynamisch ohne Neustart
+        
+        Args:
+            new_width: 40, 80, oder 81 (Amiga 80 col)
+            amiga_height: Zeilen für Amiga-Modus (24-60), ignoriert bei 40/80
+            silent: True = kein Startup Screen, keine MessageBox (für Phonebook-Dial)
+        """
+        old_width = self.screen_width
+        old_height = self.screen_height
+        
+        # Amiga 80 mode: value 81 → actual 80 cols + amiga flag + variable height
+        if new_width == 81:
+            actual_width = 80
+            actual_height = max(24, min(60, amiga_height))
+            self.amiga_mode = True
+        else:
+            actual_width = new_width
+            actual_height = 25
+            self.amiga_mode = False
+        
+        debug_print(f"Switching column mode: {old_width}x{old_height} → {actual_width}x{actual_height} (amiga={self.amiga_mode})")
+        
+        # Update Width/Height
+        self.screen_width = actual_width
+        self.screen_height = actual_height
+        
+        # Zoom und Titel anpassen — Fenster-Größe NICHT ändern
+        if self.amiga_mode:
+            self.current_zoom = 2
+            self.title(f"PYCGMS V{PYCGMS_VERSION} [Amiga 80x{actual_height}]")
+        elif actual_width == 40:
+            self.current_zoom = 4
+            self.title(f"PYCGMS V{PYCGMS_VERSION} by lA-sTYLe/Quantum (2026)")
+        else:
+            self.title(f"PYCGMS V{PYCGMS_VERSION} by lA-sTYLe/Quantum (2026)")
+        
+        # Erstelle neuen Screen Buffer mit neuer Width/Height
+        from petscii_parser import PETSCIIScreenBuffer, PETSCIIParser
+        self.screen = PETSCIIScreenBuffer(self.screen_width, self.screen_height)
+        
+        # Parser + Renderer: Amiga → ANSI/ASCII, C64 → PETSCII
+        if self.amiga_mode:
+            from ansi_parser import ANSIParser
+            from amiga_renderer import AmigaFontRenderer
+            self.parser = ANSIParser(self.screen)
+            self.renderer = AmigaFontRenderer(self.screen, zoom=self.current_zoom,
+                                               font_path=self.settings.get('amiga_font', '') or None)
+        else:
+            from c64_rom_renderer import AnimatedC64ROMFontRenderer
+            self.parser = PETSCIIParser(self.screen)
+            self.renderer = AnimatedC64ROMFontRenderer(
+                self.screen,
+                font_upper_path="upper.bmp",
+                font_lower_path="lower.bmp",
+                zoom=self.current_zoom
+            )
+        
+        # Update Column-Anzeige in Statusbar
+        if self.amiga_mode:
+            self.column_var.set(f"80x{actual_height} AMIGA")
+        else:
+            self.column_var.set(f"{actual_width} COL")
+        
+        # Lade Startup Screen NUR wenn NICHT verbunden und NICHT silent
+        if not self.connected and not silent:
             self.load_startup_screen()
         else:
-            # Bei aktiver Verbindung: Leeren Screen zeigen
+            # Bei aktiver Verbindung oder silent: Leeren Screen zeigen
             self.screen.clear_screen()
-            debug_print("Column switch during active connection - screen cleared")
+            if not silent:
+                debug_print("Column switch during active connection - screen cleared")
         
-        # Render
-        self.render_display()
-        
-        # Update Zoom für neue Width
+        # Update Zoom ZUERST, dann rendern
+        # Nach state('zoomed') braucht tkinter Zeit um die Fenstergröße zu aktualisieren
+        self.update_idletasks()
         self.update_zoom()
         
-        # Zeige Info
-        if self.connected:
-            messagebox.showinfo("Column Mode Changed", 
-                f"Switched from {old_width} to {new_width} columns.\n"
-                f"BBS connection active - screen cleared.\n"
-                f"Continue session in {new_width} column mode.")
-        else:
-            messagebox.showinfo("Column Mode Changed", 
-                f"Switched from {old_width} to {new_width} columns.\n"
-                f"Screen buffer reset.")
+        # Render mit korrektem Zoom
+        self.render_display()
         
-        debug_print(f"Column mode switched successfully to {new_width}")
+        # Nochmal verzögert falls Canvas noch nicht fertig war
+        self.after(200, self.update_zoom)
+        self.after(500, self.update_zoom)
+        
+        mode_info = f" (Amiga 80x{actual_height})" if self.amiga_mode else ""
+        
+        # Zeige Info (nicht bei silent/Phonebook-Dial)
+        if not silent:
+            if self.connected:
+                messagebox.showinfo("Column Mode Changed", 
+                    f"Switched to {actual_width}x{actual_height}{mode_info}.\n"
+                    f"BBS connection active - screen cleared.\n"
+                    f"Continue session in new mode.")
+            else:
+                messagebox.showinfo("Column Mode Changed", 
+                    f"Switched to {actual_width}x{actual_height}{mode_info}.\n"
+                    f"Screen buffer reset.")
+        
+        debug_print(f"Column mode switched successfully to {actual_width}x{actual_height}{mode_info}")
     
     def show_tools_menu(self):
         """F10 - Öffnet Tools Menu"""
@@ -5900,6 +6470,7 @@ class BBSTerminal(tk.Tk):
         protocol_order = [
             TransferProtocol.RAWTCP,       # 🚀 MAX SPEED (LAN)
             TransferProtocol.TURBOMODEM,   # ⚡ ULTRA FAST!
+            TransferProtocol.ZMODEM,       # 📡 Standard BBS
             TransferProtocol.PUNTER,       # 📦 Multi-File
             TransferProtocol.XMODEM_1K,
             TransferProtocol.XMODEM_CRC,
@@ -6152,26 +6723,35 @@ class BBSTerminal(tk.Tk):
                     final_callback()
                 return
             
-            # Konvertiere String zu PETSCII Bytes
-            # Wichtig: Nicht einfach Latin-1 encoding, sondern echte PETSCII-Konvertierung!
-            from c64_keyboard import get_petscii_for_key
-            
-            text_bytes = []
-            for char in text:
-                # Hole PETSCII Code für dieses Zeichen
-                # (shift=False, ctrl=False für normale Zeichen)
-                petscii = get_petscii_for_key(char, char, False, False, False)
+            # AMIGA MODE: Sende als ASCII/Latin-1 (keine PETSCII-Konvertierung)
+            if self.amiga_mode:
+                text_bytes = []
+                for char in text:
+                    byte_val = ord(char) if ord(char) < 256 else ord('?')
+                    text_bytes.append(byte_val)
                 
-                if petscii is not None:
-                    text_bytes.append(petscii)
-                else:
-                    # Fallback: Nutze ASCII-Wert direkt (für Zahlen/Buchstaben meist OK)
-                    text_bytes.append(ord(char) if ord(char) < 128 else ord('?'))
-            
-            debug_print(f"{debug_label} converted to PETSCII:")
-            debug_print(f"  Text: {repr(text)}")
-            debug_print(f"  PETSCII Bytes: {' '.join(f'{b:02X}' for b in text_bytes)}")
-            debug_print(f"  ASCII equiv:   {' '.join(chr(b) if 32 <= b < 127 else '.' for b in text_bytes)}")
+                debug_print(f"{debug_label} converted to ASCII (Amiga mode):")
+                debug_print(f"  Text: {repr(text)}")
+                debug_print(f"  Bytes: {' '.join(f'{b:02X}' for b in text_bytes)}")
+            else:
+                # C64 MODE: Konvertiere String zu PETSCII Bytes
+                from c64_keyboard import get_petscii_for_key
+                
+                text_bytes = []
+                for char in text:
+                    # Hole PETSCII Code für dieses Zeichen
+                    petscii = get_petscii_for_key(char, char, False, False, False)
+                    
+                    if petscii is not None:
+                        text_bytes.append(petscii)
+                    else:
+                        # Fallback: Nutze ASCII-Wert direkt
+                        text_bytes.append(ord(char) if ord(char) < 128 else ord('?'))
+                
+                debug_print(f"{debug_label} converted to PETSCII:")
+                debug_print(f"  Text: {repr(text)}")
+                debug_print(f"  PETSCII Bytes: {' '.join(f'{b:02X}' for b in text_bytes)}")
+                debug_print(f"  ASCII equiv:   {' '.join(chr(b) if 32 <= b < 127 else '.' for b in text_bytes)}")
             
             index = 0
             def send_next_char():
@@ -6252,16 +6832,20 @@ class BBSTerminal(tk.Tk):
                     config = json.load(f)
                     # Defaults für fehlende Keys
                     config.setdefault('screen_width', 40)
+                    config.setdefault('amiga_height', 25)
+                    config.setdefault('amiga_font', '')
                     config.setdefault('transfer_debug', False)
                     config.setdefault('connection_mode', 'ip')
                     config.setdefault('serial_port', '')
                     config.setdefault('serial_baudrate', 9600)
                     config.setdefault('local_echo', False)
+                    config.setdefault('use_day_folders', False)
                     return config
         except:
             pass
         return {
             'screen_width': 40,
+            'amiga_height': 25,
             'default_host': 'the-hidden.hopto.org',
             'default_port': 64128,
             'transfer_debug': False,
@@ -6270,6 +6854,44 @@ class BBSTerminal(tk.Tk):
             'serial_baudrate': 9600,
             'local_echo': False
         }
+    
+    def get_day_folder(self, base_dir, for_upload=False):
+        """Resolve day folder path if use_day_folders is enabled.
+        For downloads: creates the folder automatically.
+        For uploads: checks if folder exists, asks to create if not.
+        Returns the resolved path (with or without day subfolder)."""
+        if not self.settings.get('use_day_folders', False):
+            return base_dir
+        
+        import datetime
+        day_str = datetime.date.today().strftime('%Y-%m-%d')
+        day_path = os.path.join(base_dir, day_str)
+        
+        if for_upload:
+            if os.path.isdir(day_path):
+                return day_path
+            else:
+                result = messagebox.askyesno(
+                    "Day Folder",
+                    f"Day folder does not exist:\n{day_path}\n\nCreate it?")
+                if result:
+                    try:
+                        os.makedirs(day_path, exist_ok=True)
+                        return day_path
+                    except Exception as e:
+                        debug_print(f"Failed to create day folder: {e}")
+                        return base_dir
+                else:
+                    return base_dir
+        else:
+            # Download: create silently
+            try:
+                os.makedirs(day_path, exist_ok=True)
+                debug_print(f"Download day folder: {day_path}")
+                return day_path
+            except Exception as e:
+                debug_print(f"Failed to create day folder: {e}")
+                return base_dir
     
     def save_config(self):
         """Speichert Config"""
@@ -6288,7 +6910,7 @@ class BBSTerminal(tk.Tk):
         self.last_canvas_width = event.width
         self.last_canvas_height = event.height
         
-        # Throttle - warte 100ms nach letztem Event
+        # Throttle - warte 100ms nach letztem Event, nutze dann aktuelle Canvas-Größe
         if self.resize_pending:
             return
         
@@ -6296,8 +6918,8 @@ class BBSTerminal(tk.Tk):
         
         def do_resize():
             self.resize_pending = False
-            # Nutze event.width/height direkt
-            self.update_zoom(event.width, event.height)
+            # Nutze AKTUELLE Canvas-Größe (nicht die aus dem alten Event)
+            self.update_zoom()
         
         self.after(100, do_resize)
     
@@ -6309,7 +6931,7 @@ class BBSTerminal(tk.Tk):
                 canvas_width = force_width
                 canvas_height = force_height
             else:
-                self.canvas.update_idletasks()
+                self.update_idletasks()  # Force pending geometry changes
                 canvas_width = self.canvas.winfo_width()
                 canvas_height = self.canvas.winfo_height()
             
@@ -6339,8 +6961,13 @@ class BBSTerminal(tk.Tk):
             display_width = self.screen_width * char_width * new_zoom
             display_height = self.screen_height * char_height * new_zoom
             
-            # Nur loggen wenn Zoom sich ändert
-            if new_zoom != self.current_zoom:
+            # DEBUG: Logge bei Änderung im Amiga-Modus
+            if self.amiga_mode:
+                zoom_key = f"{canvas_width}x{canvas_height}_{self.screen_width}x{self.screen_height}_{new_zoom}"
+                if not hasattr(self, '_last_zoom_key') or self._last_zoom_key != zoom_key:
+                    self._last_zoom_key = zoom_key
+                    print(f"[ZOOM] canvas={canvas_width}x{canvas_height} screen={self.screen_width}x{self.screen_height} zoom_x={zoom_x} zoom_y={zoom_y} → zoom={new_zoom} display={display_width}x{display_height}")
+            elif new_zoom != self.current_zoom:
                 debug_print(f"Zoom: {new_zoom}x ({display_width}x{display_height})")
             
             # IMMER Zoom setzen und neu rendern (auch wenn gleich)
@@ -6375,7 +7002,9 @@ class BBSTerminal(tk.Tk):
         self.screen.clear_screen()
         
         # Suche zuerst nach width-spezifischen Startup-Screens
-        if self.screen_width == 80:
+        if self.amiga_mode:
+            startup_files = ['startup_amiga.seq', 'startup_80.seq', 'welcome_80.seq', 'startup.seq', 'welcome.seq', 'ccgms.seq']
+        elif self.screen_width == 80:
             startup_files = ['startup_80.seq', 'welcome_80.seq', 'startup.seq', 'welcome.seq', 'ccgms.seq']
         else:  # 40 columns
             startup_files = ['startup_40.seq', 'startup.seq', 'welcome.seq', 'ccgms.seq']
@@ -6699,9 +7328,24 @@ class BBSTerminal(tk.Tk):
         else:
             self.open_comport()
     
-    def connect_bbs(self, host, port, username="", password="", send_delay=100, protocol=None, transfer_speed=None, connection_mode=None):
+    def connect_bbs(self, host, port, username="", password="", send_delay=100, protocol=None, transfer_speed=None, connection_mode=None, emulation=None):
         """Verbindet mit BBS - über IP oder COM-Port je nach connection_mode"""
         try:
+            # Emulation umschalten wenn angegeben
+            if emulation:
+                emu_map = {
+                    'C64 40col': 40,
+                    'C64 80col': 80,
+                    'Amiga 80col': 81
+                }
+                new_width = emu_map.get(emulation, None)
+                if new_width is not None:
+                    current_width = 81 if self.amiga_mode else self.screen_width
+                    if new_width != current_width:
+                        amiga_height = self.settings.get('amiga_height', 25) if new_width == 81 else 25
+                        debug_print(f"Switching emulation to {emulation} (width={new_width})")
+                        self.switch_column_mode(new_width, amiga_height, silent=True)
+            
             # Speichere Login-Daten für F9
             self.current_bbs_username = username
             self.current_bbs_password = password
@@ -6870,15 +7514,32 @@ class BBSTerminal(tk.Tk):
             # Rendering
             pil_image = self.renderer.render()
             
-            # Konvertiere PIL.Image zu PhotoImage
-            self.photo = ImageTk.PhotoImage(pil_image)
-            
             # Hole aktuelle Canvas-Größe
             canvas_width = self.last_canvas_width if self.last_canvas_width > 0 else self.canvas.winfo_width()
             canvas_height = self.last_canvas_height if self.last_canvas_height > 0 else self.canvas.winfo_height()
             
             img_width = pil_image.width
             img_height = pil_image.height
+            
+            # Amiga-Modus: Bild auf volle Canvas-Größe strecken
+            if self.amiga_mode and canvas_width > 100 and canvas_height > 100:
+                # Strecke auf volle Canvas (X und Y unabhängig)
+                new_w = canvas_width
+                new_h = canvas_height
+                
+                # Debug: nur bei Änderung loggen
+                render_key = f"{img_width}x{img_height}_{canvas_width}x{canvas_height}"
+                if not hasattr(self, '_last_render_key') or self._last_render_key != render_key:
+                    self._last_render_key = render_key
+                    print(f"[RENDER] img={img_width}x{img_height} → stretch to {new_w}x{new_h}")
+                
+                if new_w != img_width or new_h != img_height:
+                    pil_image = pil_image.resize((new_w, new_h), Image.Resampling.NEAREST)
+                    img_width = new_w
+                    img_height = new_h
+            
+            # Konvertiere PIL.Image zu PhotoImage
+            self.photo = ImageTk.PhotoImage(pil_image)
             
             # Berechne Position zum Zentrieren
             x = max(0, (canvas_width - img_width) // 2)
@@ -6887,8 +7548,9 @@ class BBSTerminal(tk.Tk):
             self.canvas.delete("all")
             self.canvas.create_image(x, y, anchor=tk.NW, image=self.photo)
             
-            # Zeichne Cursor an aktueller Position
-            self.draw_terminal_cursor(x, y)
+            # Zeichne Cursor an aktueller Position (nicht im Amiga-Modus)
+            if not self.amiga_mode:
+                self.draw_terminal_cursor(x, y)
             
         except Exception as e:
             print(f"Render error: {e}")
@@ -6899,10 +7561,24 @@ class BBSTerminal(tk.Tk):
         cursor_x = self.screen.cursor_x
         cursor_y = self.screen.cursor_y
         
-        # Berechne Pixel-Position (8x8 chars * zoom)
+        # Berechne Pixel-Position
         zoom = self.renderer.zoom
         char_width = 8 * zoom
         char_height = 8 * zoom
+        
+        # Amiga-Modus: Berücksichtige zusätzliche Skalierung
+        if self.amiga_mode:
+            canvas_width = self.last_canvas_width if self.last_canvas_width > 0 else self.canvas.winfo_width()
+            canvas_height = self.last_canvas_height if self.last_canvas_height > 0 else self.canvas.winfo_height()
+            img_width = self.screen_width * char_width
+            img_height = self.screen_height * char_height
+            if canvas_width > 100 and canvas_height > 100:
+                scale_x = canvas_width / img_width
+                scale_y = canvas_height / img_height
+                scale = min(scale_x, scale_y)
+                if scale > 1.0:
+                    char_width = int(char_width * scale)
+                    char_height = int(char_height * scale)
         
         x = offset_x + (cursor_x * char_width)
         y = offset_y + (cursor_y * char_height)
@@ -7026,6 +7702,20 @@ class BBSTerminal(tk.Tk):
                                     
                                     # Parser verarbeitet die Daten → PETSCII Display
                                     self.parser.parse_bytes(data)
+                                    
+                                    # ZModem Auto-Download Detection
+                                    if self.amiga_mode:
+                                        try:
+                                            from zmodem import detect_zmodem_start, detect_zmodem_recv_ready
+                                            raw = data if isinstance(data, bytes) else data.encode('latin-1')
+                                            if detect_zmodem_start(raw) and not self.transfer_active:
+                                                debug_print("[ZMODEM] Auto-download detected (ZRQINIT)")
+                                                self.after(10, self._zmodem_auto_receive)
+                                            elif detect_zmodem_recv_ready(raw) and not self.transfer_active:
+                                                debug_print("[ZMODEM] Auto-upload detected (ZRINIT)")
+                                                self.after(10, self._zmodem_auto_send)
+                                        except ImportError:
+                                            pass
                     except Exception as e:
                         debug_print(f"[UPDATE_LOOP] Error reading data: {e}")
                     

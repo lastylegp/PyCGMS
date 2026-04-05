@@ -36,16 +36,21 @@ MAX_RETRIES = 16
 class TurboModem:
     """TurboModem Protocol Implementation"""
     
-    def __init__(self, connection, debug=False):
+    def __init__(self, connection, debug=False, telnet_unescape=False):
         """
         Args:
             connection: Socket-like object with sendall() and recv() methods
                        OR BBSTelnetClient with send_raw() and get_received_data_raw()
             debug: Enable debug logging
+            telnet_unescape: If True, unescape 0xFF 0xFF → 0xFF in received block data
+                            (needed when BBS does Telnet escaping on binary data)
         """
         self.conn = connection
         self.debug = debug
+        self.telnet_unescape = telnet_unescape
         self.debug_log = []
+        self._raw_sock = None      # Direct socket for fast transfers
+        self._drain_buf = bytearray()  # Drained queue data
         
         self.stats = {
             'blocks_sent': 0,
@@ -112,10 +117,80 @@ class TurboModem:
             self.log(f"_send: send() fallback done")
             return True
     
+    def _send_with_escape(self, data):
+        """Send data with Telnet escaping if in direct socket BBS mode.
+        Uses select() for flow control to prevent WinUAE buffer overflow."""
+        if self._raw_sock and self.telnet_unescape:
+            # Direct socket mode with Telnet active - must escape 0xFF
+            if b'\xff' in data:
+                escaped = data.replace(b'\xff', b'\xff\xff')
+                self.log(f"_send_with_escape: {len(data)}→{len(escaped)} bytes (escaped)")
+                self._send_paced(escaped)
+            else:
+                self._send_paced(data)
+        elif self._raw_sock:
+            self._send_paced(data)
+        else:
+            self._send(data)
+    
+    def _send_paced(self, data):
+        """Send data with rate limiting for WinUAE bsdsocket compatibility.
+        Limits send rate to ~1.5 MB/s to prevent buffer overflow."""
+        import select
+        CHUNK = 4096
+        offset = 0
+        while offset < len(data):
+            chunk = data[offset:offset + CHUNK]
+            # Use sendall in blocking mode - it will wait for buffer space
+            self._raw_sock.settimeout(60)  # 60s timeout per chunk
+            try:
+                self._raw_sock.sendall(chunk)
+            except Exception:
+                # Retry once with fresh timeout
+                self._raw_sock.settimeout(60)
+                self._raw_sock.sendall(chunk)
+            offset += len(chunk)
+    
+    def _check_cancel(self):
+        """Non-blocking check for TBCAN from receiver"""
+        import select, socket
+        if self._raw_sock:
+            try:
+                ready, _, _ = select.select([self._raw_sock], [], [], 0)
+                if ready:
+                    peek = self._raw_sock.recv(5, socket.MSG_PEEK)
+                    if CMD_CAN in peek:
+                        self.log("CANCEL detected from receiver!")
+                        raise Exception("Transfer cancelled by receiver")
+            except (OSError, socket.error):
+                pass
+    
     def _flush_receive_buffer(self):
         """Leert den Empfangsbuffer - entfernt alte Daten vom vorherigen Transfer"""
         self.log("Flushing receive buffer...")
         flushed = 0
+        
+        # In direct socket mode, drain buffer is already clean from _start_fast_recv
+        if self._raw_sock:
+            # Just drain any pending data from the socket itself
+            import select
+            try:
+                while True:
+                    ready, _, _ = select.select([self._raw_sock], [], [], 0.05)
+                    if not ready:
+                        break
+                    data = self._raw_sock.recv(4096)
+                    if not data:
+                        break
+                    flushed += len(data)
+            except Exception:
+                pass
+            # Also clear our drain buffer
+            if self._drain_buf:
+                flushed += len(self._drain_buf)
+                self._drain_buf.clear()
+            self.log(f"Direct socket flush: {flushed} bytes")
+            return
         
         # Methode 1: clear_receive_buffer() wenn vorhanden (BBSTelnetClient)
         if hasattr(self.conn, 'clear_receive_buffer'):
@@ -160,6 +235,101 @@ class TurboModem:
         
         self.log(f"Total flushed: {flushed} bytes")
     
+    def _start_fast_recv(self):
+        """Switch to direct socket reads, bypassing BBSTelnetClient queue.
+        Returns True if successful."""
+        print(f"### _start_fast_recv: checking conn={type(self.conn).__name__} ###")
+        if not hasattr(self.conn, 'socket') or not self.conn.socket:
+            print(f"### _start_fast_recv: FAILED - no socket attr or None ###")
+            print(f"###   hasattr socket: {hasattr(self.conn, 'socket')} ###")
+            if hasattr(self.conn, 'socket'):
+                print(f"###   socket value: {self.conn.socket} ###")
+            self.log("_start_fast_recv: no socket attribute, staying on queue")
+            return False
+        
+        import time
+        
+        # Stop receive thread
+        self.conn.running = False
+        time.sleep(0.6)  # Wait for thread to finish current recv (timeout=0.5)
+        
+        # Drain queue + read_buffer into our own buffer
+        self._drain_buf = bytearray()
+        try:
+            if hasattr(self.conn, 'read_buffer') and self.conn.read_buffer:
+                self._drain_buf.extend(self.conn.read_buffer)
+                self.conn.read_buffer.clear()
+            from queue import Empty
+            while True:
+                try:
+                    data = self.conn.receive_queue.get_nowait()
+                    if data:
+                        self._drain_buf.extend(data)
+                except Empty:
+                    break
+        except Exception as e:
+            self.log(f"_start_fast_recv: drain error: {e}")
+        
+        self._raw_sock = self.conn.socket
+        # Save original timeout and set to blocking for large transfers
+        self._orig_sock_timeout = self._raw_sock.gettimeout()
+        self._raw_sock.settimeout(None)  # Blocking - sendall() won't timeout
+        # Limit send buffer to prevent overwhelming WinUAE bsdsocket emulation
+        import socket
+        try:
+            self._orig_sndbuf = self._raw_sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+            self._raw_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8192)  # 8KB send buffer
+            self._raw_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.log(f"_start_fast_recv: SO_SNDBUF {self._orig_sndbuf} → 8192")
+        except Exception as e:
+            self._orig_sndbuf = None
+            self.log(f"_start_fast_recv: setsockopt warning: {e}")
+        self.log(f"_start_fast_recv: OK, drained {len(self._drain_buf)} bytes, orig timeout={self._orig_sock_timeout}")
+        return True
+    
+    def _stop_fast_recv(self):
+        """Restore BBSTelnetClient receive thread."""
+        if not self._raw_sock:
+            return
+        
+        # Restore original socket settings
+        if hasattr(self, '_orig_sock_timeout'):
+            try:
+                self._raw_sock.settimeout(self._orig_sock_timeout)
+            except:
+                pass
+        if hasattr(self, '_orig_sndbuf') and self._orig_sndbuf:
+            try:
+                import socket
+                self._raw_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, self._orig_sndbuf)
+            except:
+                pass
+        
+        # Put remaining drain data back
+        if self._drain_buf:
+            if hasattr(self.conn, 'read_buffer'):
+                self.conn.read_buffer.extend(self._drain_buf)
+            self._drain_buf.clear()
+        
+        self._raw_sock = None
+        
+        # Restart receive thread
+        self.conn.running = True
+        import threading
+        if hasattr(self.conn, '_receive_loop'):
+            t = threading.Thread(target=self.conn._receive_loop, daemon=True)
+            t.start()
+            self.log("_stop_fast_recv: receive thread restarted")
+    
+    def _recv(self, size, timeout=3.0):
+        """Auto-selecting recv: in direct socket mode, _recv_exact handles IAC.
+        In queue mode, uses _recv_exact_unesc when telnet_unescape is active."""
+        if self._raw_sock:
+            return self._recv_exact(size, timeout)
+        if self.telnet_unescape:
+            return self._recv_exact_unesc(size, timeout)
+        return self._recv_exact(size, timeout)
+    
     def _recv_exact(self, size, timeout=3.0):
         """
         Empfängt exakt 'size' Bytes
@@ -168,6 +338,95 @@ class TurboModem:
             bytes oder None bei Timeout/Error
         """
         import time
+        
+        # FAST PATH: Direct socket (during file transfer)
+        if self._raw_sock:
+            data = bytearray()
+            # First use drained queue data (already clean/unescaped from drain)
+            if self._drain_buf:
+                take = min(len(self._drain_buf), size)
+                data.extend(self._drain_buf[:take])
+                del self._drain_buf[:take]
+                if len(data) >= size:
+                    return bytes(data[:size])
+            
+            end_time = time.time() + timeout
+            while len(data) < size:
+                remaining = end_time - time.time()
+                if remaining <= 0:
+                    self.stats['timeouts'] += 1
+                    return None
+                try:
+                    self._raw_sock.settimeout(min(remaining, 2.0))
+                    # Read extra to account for IAC sequences that expand data
+                    want = size - len(data)
+                    chunk = self._raw_sock.recv(want + 128)
+                    if not chunk:
+                        return None
+                    
+                    if not self.telnet_unescape:
+                        data.extend(chunk)
+                    else:
+                        # IAC-aware processing
+                        i = 0
+                        while i < len(chunk):
+                            b = chunk[i]
+                            if b == 0xFF:
+                                if i + 1 >= len(chunk):
+                                    # 0xFF at end of chunk - need more data
+                                    # Save it and read more next iteration
+                                    self._raw_sock.settimeout(2.0)
+                                    try:
+                                        more = self._raw_sock.recv(16)
+                                        if more:
+                                            chunk = chunk[i:] + more
+                                            i = 0
+                                            continue
+                                    except Exception:
+                                        pass
+                                    # Can't get more, treat as data byte
+                                    data.append(0xFF)
+                                    i += 1
+                                elif chunk[i+1] == 0xFF:
+                                    # Escaped 0xFF → single 0xFF
+                                    data.append(0xFF)
+                                    i += 2
+                                elif chunk[i+1] in (0xFB, 0xFC, 0xFD, 0xFE):
+                                    # IAC WILL/WONT/DO/DONT + option = 3 bytes
+                                    if i + 2 >= len(chunk):
+                                        # Need more data for option byte
+                                        self._raw_sock.settimeout(2.0)
+                                        try:
+                                            more = self._raw_sock.recv(16)
+                                            if more:
+                                                chunk = chunk[i:] + more
+                                                i = 0
+                                                continue
+                                        except Exception:
+                                            pass
+                                        i = len(chunk)  # skip rest
+                                    else:
+                                        i += 3  # skip IAC cmd option
+                                else:
+                                    # Unknown IAC sequence, skip 2 bytes
+                                    i += 2
+                            else:
+                                # Fast copy run of non-0xFF bytes
+                                j = i + 1
+                                while j < len(chunk) and chunk[j] != 0xFF:
+                                    j += 1
+                                data.extend(chunk[i:j])
+                                i = j
+                except Exception:
+                    if time.time() >= end_time:
+                        self.stats['timeouts'] += 1
+                        return None
+            
+            # If we got more than needed, save excess to drain buffer
+            if len(data) > size:
+                self._drain_buf = bytearray(data[size:]) + self._drain_buf
+                return bytes(data[:size])
+            return bytes(data)
         
         # Nur bei großen Requests loggen (Block-Daten)
         if size > 100:
@@ -255,6 +514,62 @@ class TurboModem:
             
             return bytes(data)
     
+    def _recv_exact_unesc(self, size, timeout=3.0):
+        """Receive exactly 'size' bytes with Telnet IAC unescaping.
+        0xFF 0xFF → 0xFF, IAC commands consumed."""
+        import time
+        result = bytearray()
+        leftover = bytearray()
+        end_time = time.time() + timeout
+        
+        while len(result) < size:
+            remaining = end_time - time.time()
+            if remaining <= 0:
+                self.stats['timeouts'] += 1
+                return None
+            
+            need = size - len(result)
+            raw = self._recv_exact(need, remaining)
+            if raw is None:
+                return None
+            
+            if leftover:
+                raw = bytes(leftover) + raw
+                leftover.clear()
+            
+            # Fast path: no 0xFF at all
+            if b'\xff' not in raw:
+                result.extend(raw)
+                continue
+            
+            # Slow path: unescape
+            i = 0
+            while i < len(raw) and len(result) < size:
+                if raw[i] == 0xFF:
+                    if i + 1 >= len(raw):
+                        leftover.append(0xFF)
+                        break
+                    if raw[i+1] == 0xFF:
+                        result.append(0xFF)
+                        i += 2
+                    elif 0xFB <= raw[i+1] <= 0xFE:
+                        if i + 2 >= len(raw):
+                            leftover.extend(raw[i:])
+                            break
+                        i += 3  # skip IAC cmd option
+                    else:
+                        result.append(0xFF)
+                        i += 1
+                else:
+                    # Copy run of non-0xFF bytes at once
+                    j = i + 1
+                    while j < len(raw) and raw[j] != 0xFF and len(result) + (j - i) < size:
+                        j += 1
+                    result.extend(raw[i:j])
+                    i = j
+        
+        return bytes(result[:size])
+    
     def _wait_for_pattern(self, pattern, timeout=60):
         """
         Wartet auf ein bestimmtes Pattern in den empfangenen Daten.
@@ -339,8 +654,15 @@ class TurboModem:
         Returns:
             (block_num, data) oder None bei Error
         """
+        # In direct socket mode, _recv_exact handles IAC internally
+        # In queue mode with telnet_unescape, use _recv_exact_unesc
+        if self._raw_sock:
+            recv = self._recv_exact
+        else:
+            recv = self._recv_exact_unesc if self.telnet_unescape else self._recv_exact
+        
         # Read header
-        header = self._recv_exact(8, timeout)
+        header = recv(8, timeout)
         if not header:
             self.log("receive_block: Failed to receive header")
             return None
@@ -359,13 +681,13 @@ class TurboModem:
             self.log(f"receive_block: Block #{block_num}, header_size={block_size}, recv_size={actual_recv_size}")
         
         # Read data - empfange die angegebene Größe
-        data = self._recv_exact(actual_recv_size, timeout)
+        data = recv(actual_recv_size, timeout)
         if not data:
             self.log(f"receive_block: Failed to receive data for block #{block_num}")
             return None
         
         # Read CRC
-        crc_bytes = self._recv_exact(4, timeout)
+        crc_bytes = recv(4, timeout)
         if not crc_bytes:
             self.log(f"receive_block: Failed to receive CRC for block #{block_num}")
             return None
@@ -617,21 +939,30 @@ class TurboModem:
     def receive_file(self, filepath, callback=None):
         """
         Empfängt Datei mit TurboModem Protokoll (BBS → Client)
-        
-        Args:
-            filepath: Ziel - kann Verzeichnis oder Temp-Dateiname sein
-            callback: Progress callback(bytes_received, total_bytes, status, filename)
-            
-        Returns:
-            (success, actual_filepath) - True/False und tatsächlicher Dateipfad
         """
         import os
-        
-        # Pfad normalisieren (/ -> \ auf Windows)
         filepath = os.path.normpath(filepath).replace('/', os.sep)
         
         self.log(f"===== RECEIVE FILE START =====")
         self.log(f"Input filepath: {filepath}")
+        
+        # Switch to direct socket reads for speed
+        fast_mode = self._start_fast_recv()
+        if fast_mode:
+            self.log("Using DIRECT SOCKET (fast mode)")
+            # BBSTelnetClient = BBS connection = AmiExpress escapes 0xFF
+            if not self.telnet_unescape:
+                self.telnet_unescape = True
+                self.log("Auto-enabled Telnet unescaping (BBS connection detected)")
+        
+        try:
+            return self._receive_file_impl(filepath, callback)
+        finally:
+            self._stop_fast_recv()
+    
+    def _receive_file_impl(self, filepath, callback=None):
+        """Inner receive_file implementation."""
+        import os
         
         # Bestimme Ziel-Verzeichnis
         if os.path.isdir(filepath):
@@ -769,14 +1100,14 @@ class TurboModem:
         self.log("Waiting for Filesize + Filename...")
         
         # Receive filesize (8 bytes)
-        filesize_bytes = self._recv_exact(8, timeout=10)
+        filesize_bytes = self._recv(8, timeout=10)
         if not filesize_bytes:
             return (False, None)
         
         filesize = struct.unpack('>Q', filesize_bytes)[0]
         
         # Receive filename length (2 bytes)
-        filename_len_bytes = self._recv_exact(2, timeout=10)
+        filename_len_bytes = self._recv(2, timeout=10)
         if not filename_len_bytes:
             return (False, None)
         
@@ -784,7 +1115,7 @@ class TurboModem:
         self.log(f"Filename length: {filename_len}")
         
         # Receive filename
-        filename_bytes = self._recv_exact(filename_len, timeout=10)
+        filename_bytes = self._recv(filename_len, timeout=10)
         if not filename_bytes:
             return (False, None)
         
@@ -915,7 +1246,7 @@ class TurboModem:
                     expected_block += 1
                     blocks_written += 1
                     
-                    if callback:
+                    if callback and (blocks_written % 8 == 0 or bytes_received >= filesize):
                         callback(bytes_received, filesize, f"Received {bytes_received // 1024} KB", filename)
                     
                     # Check if we're done
@@ -1030,97 +1361,110 @@ class TurboModem:
     
     def send_files(self, file_list, callback=None):
         """
-        Sendet mehrere Dateien (Server-Seite)
+        Sendet mehrere Dateien (PYCGMS→BBS Upload, Streaming Mode)
         
         Protokoll:
         1. Warte auf TBRQ
-        2. Sende TBOK + Datei (oder TBND wenn keine mehr)
+        2. Sende TBOK + Datei streaming (oder TBND wenn keine mehr)
         3. Nach EOT+ACK: Zurück zu 1
-        
-        Args:
-            file_list: Liste von Dateipfaden
-            callback: Progress callback(bytes, total, status, filename)
-        
-        Returns:
-            (success, files_sent)
         """
         import os
         
+        print(f"### TurboModem.send_files() ENTERED: {len(file_list)} files ###")
+        print(f"### conn type: {type(self.conn).__name__} ###")
+        
         self.log(f"===== SEND MULTI-FILE: {len(file_list)} files =====")
         self.stats['start_time'] = time.time()
+        self.debug = True  # Force debug for uploads too
         
-        # Buffer leeren - alte Daten vom vorherigen Transfer entfernen
-        self._flush_receive_buffer()
+        # Activate direct socket for BBS uploads
+        fast_mode = False
+        if hasattr(self.conn, 'get_received_data_raw'):
+            self._start_fast_recv()
+            fast_mode = self._raw_sock is not None
+            if fast_mode:
+                # Enable telnet_unescape for BBS mode
+                self.telnet_unescape = True
+                print(f"### Upload: Direct socket active, telnet_escape=True ###")
         
-        queue = list(file_list)  # Kopie der Liste
-        files_sent = 0
-        total_bytes = sum(os.path.getsize(f) for f in queue if os.path.exists(f))
-        bytes_sent_total = 0
+        try:
+            # Buffer leeren
+            self._flush_receive_buffer()
+            
+            queue = list(file_list)
+            files_sent = 0
+            total_bytes = sum(os.path.getsize(f) for f in queue if os.path.exists(f))
+            bytes_sent_total = 0
+            
+            while True:
+                # Wait for REQUEST
+                self.log("Waiting for TBRQ...")
+                req = self._wait_for_pattern(CMD_REQUEST, timeout=60)
+                
+                if req != CMD_REQUEST:
+                    self.log(f"Expected TBRQ, got {req}")
+                    break
+                
+                self.log("<<< TBRQ received")
+                
+                if not queue:
+                    self.log("Queue empty - sending TBND")
+                    self._send_with_escape(CMD_END)
+                    break
+                
+                filepath = queue.pop(0)
+                
+                if not os.path.exists(filepath):
+                    self.log(f"File not found: {filepath}, skipping")
+                    continue
+                
+                filesize = os.path.getsize(filepath)
+                filename = os.path.basename(filepath)
+                
+                success = self._send_file_after_request(filepath, filesize, filename, callback)
+                
+                if success:
+                    files_sent += 1
+                    bytes_sent_total += filesize
+                    self.log(f"File {files_sent}/{len(file_list)} complete: {filename}")
+                else:
+                    self.log(f"Failed to send: {filename}")
+            
+            self.stats['end_time'] = time.time()
+            self.stats['files_transferred'] = files_sent
+            duration = self.stats['end_time'] - self.stats['start_time']
+            
+            self.log(f"===== MULTI-SEND COMPLETE =====")
+            self.log(f"Files sent: {files_sent}/{len(file_list)}")
+            self.log(f"Total bytes: {bytes_sent_total:,}")
+            if duration > 0:
+                self.log(f"Speed: {bytes_sent_total/duration/1024:.2f} KB/s")
+            
+            return (files_sent == len(file_list), files_sent)
         
-        while True:
-            # Wait for REQUEST - search for TBRQ pattern (handles Telnet IAC leftovers)
-            self.log("Waiting for TBRQ...")
-            req = self._wait_for_pattern(CMD_REQUEST, timeout=60)
-            
-            if req != CMD_REQUEST:
-                self.log(f"Expected TBRQ, got {req}")
-                break
-            
-            self.log("<<< TBRQ received")
-            
-            if not queue:
-                # No more files - send END
-                self.log("Queue empty - sending TBND")
-                self._send(CMD_END)
-                break
-            
-            # Get next file
-            filepath = queue.pop(0)
-            
-            if not os.path.exists(filepath):
-                self.log(f"File not found: {filepath}, skipping")
-                continue
-            
-            filesize = os.path.getsize(filepath)
-            filename = os.path.basename(filepath)
-            
-            # Send file using existing send_file logic (but we already have TBRQ)
-            success = self._send_file_after_request(filepath, filesize, filename, callback)
-            
-            if success:
-                files_sent += 1
-                bytes_sent_total += filesize
-                self.log(f"File {files_sent}/{len(file_list)} complete: {filename}")
-                # Note: Don't flush buffer here! TBRQ might already be waiting.
-                # _wait_for_pattern will handle any garbage before TBRQ.
-            else:
-                self.log(f"Failed to send: {filename}")
-        
-        self.stats['end_time'] = time.time()
-        self.stats['files_transferred'] = files_sent
-        duration = self.stats['end_time'] - self.stats['start_time']
-        
-        self.log(f"===== MULTI-SEND COMPLETE =====")
-        self.log(f"Files sent: {files_sent}/{len(file_list)}")
-        self.log(f"Total bytes: {bytes_sent_total:,}")
-        self.log(f"Duration: {duration:.2f}s")
-        if duration > 0:
-            self.log(f"Speed: {bytes_sent_total/duration/1024:.2f} KB/s")
-        
-        # Debug log speichern
-        self.save_debug_log("turbomodem_upload_debug.txt")
-        
-        return (files_sent == len(file_list), files_sent)
+        except Exception as e:
+            self.log(f"EXCEPTION in send_files: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+            print(f"### Upload CRASH: {e} ###")
+            raise
+        finally:
+            logpath = os.path.join(os.path.dirname(file_list[0]) if file_list else ".", "turbomodem_upload_debug.txt")
+            self.save_debug_log(logpath)
+            print(f"### Upload debug log: {logpath} ({len(self.debug_log)} entries) ###")
+            self._stop_fast_recv()
     
     def _send_file_after_request(self, filepath, filesize, filename, callback=None):
-        """Interne Methode: Sendet TBOK + Daten (nach TBRQ bereits empfangen)"""
+        """Interne Methode: Sendet TBOK + Daten STREAMING (nach TBRQ bereits empfangen)"""
         import os
         
         try:
-            self.log(f"=== _send_file_after_request START ===")
+            self.log(f"=== _send_file_after_request START (STREAMING) ===")
             self.log(f"  filepath: {filepath}")
             self.log(f"  filesize: {filesize}")
             self.log(f"  filename: {filename}")
+            self.log(f"  raw_sock: {self._raw_sock is not None}")
+            self.log(f"  telnet_unescape: {self.telnet_unescape}")
             
             filename_bytes = filename.encode('utf-8')
             filename_len = len(filename_bytes)
@@ -1129,116 +1473,138 @@ class TurboModem:
             header = CMD_OK + struct.pack('>Q', filesize) + struct.pack('>H', filename_len) + filename_bytes
             self.log(f"Header built: {len(header)} bytes")
             
-            self._send(header)
-            self.log(f"TBOK header sent ({len(header)} bytes)")
+            # === TBOK RETRY LOOP ===
+            # AmiExpress has a bug: its conPuts/Send sets the telnet socket to
+            # non-blocking (FIONBIO=1) and never resets it. WinUAE's bsdsocket
+            # WaitSelect() then returns immediately with res=0 instead of waiting,
+            # so xpr_sread() sees 0 bytes even though we sent TBOK.
+            # The XPR library retries TBRQ up to 30 times. We detect repeated
+            # TBRQs and re-send our TBOK header each time until the XPR finally
+            # sees it (which happens eventually when enough data accumulates or
+            # WaitSelect catches up).
+            tbok_sent = 0
+            tbok_max_retries = 60
             
-            # Callback mit Error-Handling
+            for tbok_attempt in range(tbok_max_retries):
+                self._send_with_escape(header)
+                tbok_sent += 1
+                self.log(f"TBOK header sent (attempt {tbok_sent}, {len(header)} bytes)")
+                if tbok_attempt == 0:
+                    print(f"### Upload: {filename} ({filesize:,} bytes) ###")
+                
+                # Wait briefly to see if XPR sends another TBRQ (meaning it didn't see our TBOK)
+                # or if it starts expecting blocks (meaning TBOK was received)
+                import select
+                if self._raw_sock:
+                    try:
+                        ready, _, _ = select.select([self._raw_sock], [], [], 0.5)
+                        if ready:
+                            # Something came back - peek to see if it's another TBRQ
+                            import socket as sock_mod
+                            peek = self._raw_sock.recv(4, sock_mod.MSG_PEEK)
+                            if peek == CMD_REQUEST:
+                                # XPR sent another TBRQ - it didn't see our TBOK
+                                # Consume the TBRQ and retry
+                                self._raw_sock.recv(4)
+                                self.log(f"Got repeated TBRQ (attempt {tbok_sent}) - XPR didn't see TBOK, resending...")
+                                print(f"### TBOK retry {tbok_sent} (XPR didn't see it yet) ###")
+                                continue
+                            else:
+                                # Got something else - XPR must have received TBOK
+                                # and is now sending something else (or it's noise)
+                                self.log(f"Got non-TBRQ response after TBOK: {peek.hex()} - proceeding")
+                                break
+                        else:
+                            # No response within 0.5s - XPR probably received TBOK
+                            # and is now waiting for blocks
+                            self.log(f"No TBRQ retry within 0.5s - TBOK accepted (attempt {tbok_sent})")
+                            break
+                    except Exception as e:
+                        self.log(f"TBOK retry check error: {e}")
+                        break
+                else:
+                    # No raw socket - just send once and hope for the best
+                    break
+            
+            self.log(f"TBOK handshake complete after {tbok_sent} attempts")
+            print(f"### TBOK accepted after {tbok_sent} attempt(s) ###")
+            
             if callback:
                 try:
                     callback(0, filesize, "Starting transfer...", filename)
                 except Exception as cb_err:
                     self.log(f"WARNING: Callback error: {cb_err}")
             
-            self.log(f"Opening file...")
             f = open(filepath, 'rb')
-            self.log(f"File opened successfully")
             
-            block_num = 1
-            window = []
+            block_num = 0
             bytes_sent = 0
-            retries = 0
+            total_blocks = (filesize + BLOCK_SIZE - 1) // BLOCK_SIZE
+            if total_blocks == 0:
+                total_blocks = 1
             
             while True:
-                # Fill window
-                self.log(f"Filling window (current: {len(window)}, target: {WINDOW_SIZE})")
-                while len(window) < WINDOW_SIZE:
-                    data = f.read(BLOCK_SIZE)
-                    if not data:
-                        self.log(f"EOF reached")
-                        break
-                    window.append((block_num, data))
-                    self.log(f"Read block {block_num}: {len(data)} bytes")
-                    block_num += 1
-                
-                if not window:
-                    self.log("No more blocks to send")
+                data = f.read(BLOCK_SIZE)
+                if not data:
                     break
                 
-                # Send window
-                self.log(f"Sending {len(window)} blocks...")
-                for bn, data in window:
-                    self.send_block(bn, data)
+                block_num += 1
+                original_len = len(data)
                 
-                self.log("Blocks sent, waiting for ACK...")
+                # Pad to BLOCK_SIZE
+                if len(data) < BLOCK_SIZE:
+                    data = data + b'\x00' * (BLOCK_SIZE - len(data))
                 
-                # Wait for ACK
-                ack_cmd = self._recv_exact(4, timeout=10)
+                # Build block: MAGIC(2) + BlockNum(4) + Size(2) + Data(4096) + CRC(4)
+                block_header = MAGIC + struct.pack('>I', block_num) + struct.pack('>H', BLOCK_SIZE)
+                crc = zlib.crc32(data) & 0xFFFFFFFF
+                block = block_header + data + struct.pack('>I', crc)
                 
-                if ack_cmd == CMD_CAN:
-                    self.log("Transfer cancelled by receiver")
-                    f.close()
-                    return False
+                self._send_with_escape(block)
                 
-                if ack_cmd != CMD_ACK:
-                    self.log(f"Expected ACK, got: {ack_cmd}")
-                    retries += 1
-                    if retries > MAX_RETRIES:
-                        self.log("Max retries exceeded")
-                        f.close()
-                        return False
-                    continue
+                bytes_sent += original_len
+                self.stats['blocks_sent'] += 1
                 
-                # Get bitmap
-                bitmap_bytes = self._recv_exact(1, timeout=1)
-                if not bitmap_bytes:
-                    self.log("No bitmap received")
-                    retries += 1
-                    if retries > MAX_RETRIES:
-                        f.close()
-                        return False
-                    continue
+                # Callback every 8 blocks
+                if callback and (block_num % 8 == 0 or bytes_sent >= filesize):
+                    try:
+                        callback(bytes_sent, filesize, f"Sent {bytes_sent // 1024} KB", filename)
+                    except:
+                        pass
                 
-                bitmap = bitmap_bytes[0]
-                self.log(f"ACK received, bitmap: {bitmap:02x}")
+                # Console progress every 256 blocks
+                if block_num % 256 == 0 or bytes_sent >= filesize:
+                    elapsed = time.time() - self.stats['start_time']
+                    speed = bytes_sent / elapsed / 1024 if elapsed > 0 else 0
+                    pct = bytes_sent * 100 / filesize if filesize > 0 else 0
+                    print(f"### UP {block_num}/{total_blocks}  {bytes_sent//1024}KB/{filesize//1024}KB ({pct:.1f}%) {speed:.1f}KB/s ###")
                 
-                if bitmap >= 0xFE:  # Accept 0xFE or 0xFF
-                    # All OK
-                    for bn, data in window:
-                        bytes_sent += len(data)
-                    window = []
-                    retries = 0
-                    self.log(f"Window OK, {bytes_sent}/{filesize} bytes sent")
-                    
-                    if callback:
-                        try:
-                            callback(bytes_sent, filesize, f"Sent {bytes_sent // 1024} KB", filename)
-                        except:
-                            pass
-                else:
-                    # Retransmit needed
-                    self.log(f"Retransmit requested, bitmap: {bitmap:02x}")
-                    new_window = []
-                    for i, (bn, data) in enumerate(window):
-                        if not (bitmap & (1 << i)):
-                            new_window.append((bn, data))
-                            self.stats['retransmits'] += 1
-                    window = new_window
-                    retries += 1
-                    if retries > MAX_RETRIES:
-                        f.close()
-                        return False
+                # Flow control: wait for ACK every 256 blocks (1MB)
+                # The XPR library sends TBAC+0xFF after every 256 blocks received
+                if block_num % 256 == 0:
+                    self.log(f"Waiting for flow control ACK after block {block_num}...")
+                    ack = self._recv(5, timeout=30)
+                    if ack and len(ack) >= 4 and ack[:4] == CMD_ACK:
+                        self.log(f"Flow control ACK received")
+                    elif ack and len(ack) >= 5 and ack[:5] == CMD_CAN:
+                        self.log(f"CANCEL received from library")
+                        raise Exception("Transfer cancelled by receiver")
+                    else:
+                        self.log(f"Unexpected flow control response: {ack}")
+                        # Continue anyway - might be Telnet noise
             
             f.close()
             
             # Send EOT
             self.log("Sending EOT...")
-            self._send(CMD_EOT)
+            self._send_with_escape(CMD_EOT)
             
             # Wait for final ACK (5 bytes: TBAC + bitmap)
-            final_ack = self._recv_exact(5, timeout=5)
+            final_ack = self._recv(5, timeout=10)
             self.log(f"Final ACK: {final_ack}")
             
             self.stats['bytes_transferred'] += filesize
+            print(f"### Upload complete: {filename} ({filesize:,} bytes) ###")
             
             if callback:
                 try:
@@ -1247,15 +1613,14 @@ class TurboModem:
                     pass
             
             self.log(f"=== _send_file_after_request COMPLETE ===")
-            # Check if ACK received (first 4 bytes are TBAC)
             return final_ack and len(final_ack) >= 4 and final_ack[:4] == CMD_ACK
             
         except Exception as e:
             self.log(f"!!! EXCEPTION in _send_file_after_request: {e}")
             import traceback
             self.log(traceback.format_exc())
-            # Speichere Log sofort bei Exception
             self.save_debug_log("turbomodem_CRASH.txt")
+            print(f"### Upload EXCEPTION: {e} ###")
             return False
     
     def receive_files(self, target_dir, callback=None, max_files=100):
@@ -1277,8 +1642,48 @@ class TurboModem:
         """
         import os
         
+        print(f"### TURBOMODEM V4-DIRECT-SOCKET ###")
+        print(f"### receive_files({target_dir}) ###")
+        print(f"### conn type: {type(self.conn).__name__} ###")
+        print(f"### has socket: {hasattr(self.conn, 'socket')} ###")
+        if hasattr(self.conn, 'socket'):
+            print(f"### socket value: {self.conn.socket} ###")
+        
         self.log(f"===== RECEIVE MULTI-FILE to {target_dir} =====")
         self.stats['start_time'] = time.time()
+        self.debug = True  # Force debug for BBS troubleshooting
+        
+        # Switch to direct socket reads for speed
+        fast_mode = self._start_fast_recv()
+        print(f"### fast_mode: {fast_mode} ###")
+        print(f"### _raw_sock: {self._raw_sock} ###")
+        print(f"### telnet_unescape: {self.telnet_unescape} ###")
+        if fast_mode:
+            self.log("Using DIRECT SOCKET (fast mode)")
+            if not self.telnet_unescape:
+                self.telnet_unescape = True
+                self.log("Auto-enabled Telnet unescaping (BBS connection detected)")
+        
+        try:
+            return self._receive_files_impl(target_dir, callback, max_files)
+        except Exception as e:
+            self.log(f"EXCEPTION in receive_files: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+            import os
+            self.save_debug_log(os.path.join(target_dir, "turbomodem_download_CRASH.txt"))
+            print(f"### CRASH: {e} ###")
+            raise
+        finally:
+            import os
+            logpath = os.path.join(target_dir, "turbomodem_download_debug.txt")
+            self.save_debug_log(logpath)
+            print(f"### Debug log: {logpath} ({len(self.debug_log)} entries) ###")
+            self._stop_fast_recv()
+    
+    def _receive_files_impl(self, target_dir, callback=None, max_files=100):
+        """Inner receive_files implementation."""
+        import os
         
         # Buffer leeren - alte Daten vom vorherigen Transfer entfernen
         self._flush_receive_buffer()
@@ -1294,7 +1699,8 @@ class TurboModem:
             self._send(CMD_REQUEST)
             
             # Wait for OK or END
-            response = self._recv_exact(4, timeout=30)
+            response = self._recv(4, timeout=30)
+            print(f"### Got response: {response} ###")
             
             if response == CMD_END:
                 self.log("Got TBND - transfer complete")
@@ -1329,28 +1735,29 @@ class TurboModem:
         return (len(received_files) > 0, received_files)
     
     def _receive_file_after_ok(self, target_dir, callback=None):
-        """Interne Methode: Empfängt Dateidaten nach TBOK"""
+        """Interne Methode: Empfängt Dateidaten nach TBOK - STREAMING MODE"""
         import os
         
         # Receive filesize
-        filesize_bytes = self._recv_exact(8, timeout=10)
+        filesize_bytes = self._recv(8, timeout=10)
         if not filesize_bytes:
             return (False, None)
         filesize = struct.unpack('>Q', filesize_bytes)[0]
         
         # Receive filename length
-        filename_len_bytes = self._recv_exact(2, timeout=10)
+        filename_len_bytes = self._recv(2, timeout=10)
         if not filename_len_bytes:
             return (False, None)
         filename_len = struct.unpack('>H', filename_len_bytes)[0]
         
         # Receive filename
-        filename_bytes = self._recv_exact(filename_len, timeout=10)
+        filename_bytes = self._recv(filename_len, timeout=10)
         if not filename_bytes:
             return (False, None)
         filename = filename_bytes.decode('utf-8', errors='replace')
         
         self.log(f"Receiving: {filename} ({filesize:,} bytes)")
+        print(f"### Receiving: {filename} ({filesize:,} bytes) ###")
         
         filepath = os.path.join(target_dir, filename)
         
@@ -1360,90 +1767,59 @@ class TurboModem:
         total_blocks = (filesize + BLOCK_SIZE - 1) // BLOCK_SIZE
         if total_blocks == 0:
             total_blocks = 1
-        expected_block = 1
-        bytes_received = 0
-        retries = 0
         
-        self.log(f"Expecting {total_blocks} blocks of {BLOCK_SIZE} bytes")
+        bytes_received = 0
+        blocks_written = 0
+        
+        self.log(f"STREAMING receive: {total_blocks} blocks of {BLOCK_SIZE} bytes")
         
         with open(filepath, 'wb') as f:
             while bytes_received < filesize:
-                window_received = {}
-                # Nur so viele Blöcke erwarten wie noch fehlen!
-                blocks_remaining = total_blocks - expected_block + 1
-                expected_blocks_in_window = min(WINDOW_SIZE, blocks_remaining)
-                
-                self.log(f"Window: expecting {expected_blocks_in_window} blocks (block {expected_block}-{expected_block + expected_blocks_in_window - 1})")
-                
-                # Receive window
-                blocks_got = 0
-                for _ in range(expected_blocks_in_window):
-                    result = self.receive_block(timeout=10)
-                    if result:
-                        bn, data = result
-                        window_received[bn] = data
-                        blocks_got += 1
-                        self.log(f"Got block {bn} ({len(data)} bytes)")
-                    else:
-                        self.log(f"Block receive timeout/error")
-                        break  # Stop waiting for more blocks
-                
-                self.log(f"Window received {blocks_got}/{expected_blocks_in_window} blocks")
-                
-                # Build bitmap - nur für die erwarteten Blöcke
-                bitmap = 0x00  # Start with all missing
-                for i in range(expected_blocks_in_window):
-                    if (expected_block + i) in window_received:
-                        bitmap |= (1 << i)  # Mark as received
-                
-                self.log(f"Sending ACK with bitmap {bitmap:02x}")
-                
-                # Send ACK
-                self._send(CMD_ACK + bytes([bitmap]))
-                
-                # Prüfe ob wir alle erwarteten Blöcke haben
-                all_received = (blocks_got == expected_blocks_in_window)
-                
-                if not all_received:
-                    # Nicht alle Blöcke bekommen
-                    retries += 1
-                    self.log(f"Missing blocks, retry {retries}/{MAX_RETRIES}")
-                    if retries > MAX_RETRIES:
+                result = self.receive_block(timeout=30)
+                if not result:
+                    self.log(f"Block receive failed at block {blocks_written + 1}")
+                    print(f"### Block receive FAILED at block {blocks_written + 1}, {bytes_received}/{filesize} ###")
+                    # Try a few more times
+                    retries = 0
+                    while retries < 3 and not result:
+                        retries += 1
+                        self.log(f"Retry {retries}/3...")
+                        result = self.receive_block(timeout=30)
+                    if not result:
                         self._send(CMD_CAN)
                         return (False, None)
-                    continue
                 
-                # Write blocks in order
-                while expected_block in window_received:
-                    data = window_received[expected_block]
-                    
-                    # Truncate last block if needed
-                    remaining = filesize - bytes_received
-                    if len(data) > remaining:
-                        data = data[:remaining]
-                    
-                    f.write(data)
-                    bytes_received += len(data)
-                    del window_received[expected_block]
-                    expected_block += 1
-                    
-                    if callback:
-                        callback(bytes_received, filesize, f"Received {bytes_received // 1024} KB", filename)
+                bn, data = result
                 
-                self.log(f"Progress: {bytes_received}/{filesize} bytes")
-                retries = 0
+                # Truncate last block if needed
+                remaining = filesize - bytes_received
+                if len(data) > remaining:
+                    data = data[:remaining]
                 
-                # Check if done
-                if bytes_received >= filesize:
-                    self.log(f"File complete!")
-                    break
+                f.write(data)
+                bytes_received += len(data)
+                blocks_written += 1
+                
+                # Progress callback every 8 blocks
+                if callback and (blocks_written % 8 == 0 or bytes_received >= filesize):
+                    callback(bytes_received, filesize, f"Received {bytes_received // 1024} KB", filename)
+                
+                # Console progress every 256 blocks (~1MB)
+                if blocks_written % 256 == 0 or bytes_received >= filesize:
+                    elapsed = time.time() - self.stats['start_time']
+                    speed = bytes_received / elapsed / 1024 if elapsed > 0 else 0
+                    pct = bytes_received * 100 / filesize if filesize > 0 else 0
+                    print(f"### {blocks_written}/{total_blocks} blocks  {bytes_received//1024}KB/{filesize//1024}KB ({pct:.1f}%) {speed:.1f}KB/s ###")
+        
+        self.log(f"File complete: {bytes_received} bytes in {blocks_written} blocks")
+        print(f"### File complete: {filename} ({bytes_received:,} bytes) ###")
         
         # Wait for EOT
         self.log("Waiting for EOT...")
-        eot = self._recv_exact(5, timeout=5)
+        eot = self._recv(5, timeout=5)
         if eot == CMD_EOT:
             self.log("Got EOT, sending final ACK")
-            self._send(CMD_ACK + b'\xfe')  # IMMER mit Bitmap 0xFE!
+            self._send(CMD_ACK + b'\xfe')
         else:
             self.log(f"Expected EOT, got: {eot}")
         

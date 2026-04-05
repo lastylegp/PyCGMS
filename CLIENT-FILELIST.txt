@@ -1,4 +1,4 @@
-# PYCGMS V1.0 Terminal Client - File List
+# PYCGMS V1.2 Terminal Client - File List
 # Package Contents for BBS Users
 
 ## Core Terminal Modules

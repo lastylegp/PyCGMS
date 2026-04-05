@@ -1,4 +1,4 @@
-# PYCGMS V1.0 Terminal Client
+# PYCGMS V1.2 Terminal Client
 **by lA-sTYLe/Quantum (2026)**
 
 Modern PETSCII-capable BBS terminal with multi-protocol file transfer support.
