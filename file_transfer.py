@@ -2152,13 +2152,11 @@ class FileTransfer:
                         safe = safe + ext
 
                     if not safe.endswith(ext):
-                        # for correctness, if it is a starzip file do not add the extension
-                        if safe[0].isnumeric() and safe[1] == '!':
-                            # starzip, no extension
-                            pass
-                        else:
-                            # not starzip, add extension
-                            safe = safe + ext
+                        safe = safe + ext
+                        
+                    # for correctness, if it is a starzip file remove the extension
+                    if safe[0].isnumeric() and safe[1] == '!' and safe.endswith(ext):
+                        safe = safe[:-len(ext)]
 
                     safe = safe.lower()
                     current = os.path.join(target_dir, safe) if os.path.isdir(filepath) else filepath
