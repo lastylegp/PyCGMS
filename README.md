@@ -95,6 +95,10 @@ python run_terminal.py
 | **Alt+1-8** | C64 extended colors |
 | **Ctrl+Alt+F1-F10** | Send hotkey macro |
 
+### Copy to Clipboard
+
+selecting text with the left mouse and right clicking will copy the selected text to the clipboard.
+
 ### C64 Keyboard Mapping
 
 The terminal maps your keyboard to C64 PETSCII codes:

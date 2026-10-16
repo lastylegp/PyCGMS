@@ -413,8 +413,114 @@ class ScrollbackBuffer:
         return len(self.lines)
 
 
+class TextSelectionMixin:
+    """
+    Logic for text selection and clipboard in terminal windows.
 
-class ScrollbackViewer(tk.Toplevel):
+    Subclasses must provide:
+    - _canvas_to_cell(event) -> (col, row)
+    - _draw_selection()
+    - _show_copy_message(msg)
+    - self.screen (PETSCIIScreenBuffer)
+    - self._sel_start / _sel_end / _sel_moved (initialised in __init__)
+    """
+
+    def _on_sel_press(self, event):
+        """Beginnt Textauswahl (Linksklick auf Canvas)."""
+        self._sel_start = self._canvas_to_cell(event)
+        self._sel_end = self._sel_start
+        self._sel_moved = False
+
+    def _on_sel_drag(self, event):
+        """Erweitert Textauswahl beim Ziehen."""
+        if not self._sel_start:
+            return
+        self._sel_moved = True
+        self._sel_end = self._canvas_to_cell(event)
+        self._draw_selection()
+
+    def _on_sel_release(self, event):
+        """Beendet Textauswahl."""
+        if not self._sel_start:
+            return
+        self._sel_end = self._canvas_to_cell(event)
+        if not self._sel_moved:
+            self._sel_start = None
+            self._sel_end = None
+        self._sel_moved = False
+        self._draw_selection()
+
+    def _on_copy_click(self, event):
+        """Rechtsklick: kopiert den markierten Text in die Zwischenablage."""
+        text = self._get_selection_text()
+        if not text:
+            self._show_copy_message("No text selected - drag with left mouse button to select")
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            # Auswahl aufheben, damit das Overlay nicht persistiert
+            self._sel_start = None
+            self._sel_end = None
+            self._sel_moved = False
+            self._draw_selection()
+            # messagebox.showinfo("Copy", f"Copied {len(text)} characters to clipboard.", parent=self)
+            self._show_copy_message(f"Copied {len(text)} chars")
+        except Exception as e:
+            print(f"Clipboard error: {e}")
+
+    def _get_selection_text(self):
+        """Extrahiert den markierten Bereich als ASCII-Text."""
+        if not self._sel_start or not self._sel_end:
+            return ""
+        (c1, r1), (c2, r2) = self._sel_start, self._sel_end
+        left, right = min(c1, c2), max(c1, c2)
+        top, bottom = min(r1, r2), max(r1, r2)
+        lines = []
+        for row in range(top, bottom + 1):
+            if row >= len(self.screen.buffer):
+                break
+            buf_row = self.screen.buffer[row]
+            chars = []
+            for col in range(left, right + 1):
+                if col < len(buf_row):
+                    cell = buf_row[col]
+                    sc = ord(cell.char) if isinstance(cell.char, str) else cell.char
+                    chars.append(self._screencode_to_ascii(sc))
+                else:
+                    chars.append(' ')
+            lines.append(''.join(chars).rstrip())
+        return '\n'.join(lines)
+
+    def _screencode_to_ascii(self, screencode):
+        """Konvertiert SCREENCODE zu lesbarem ASCII (folgt dem Font-Anzeige-Schema)."""
+        sc = screencode & 0x7F
+        if sc == 0x00:
+            return '@'
+        if 0x01 <= sc <= 0x1A:
+            if getattr(self.screen, 'charset_mode', 'lower') == 'lower':
+                return chr(sc + 0x60)          # a-z
+            return chr(sc + 0x40)              # A-Z
+        if sc == 0x1B:
+            return '['
+        if sc == 0x1C:
+            return '\\'                     # £
+        if sc == 0x1D:
+            return ']'
+        if sc == 0x1E:
+            return '^'                      # ↑
+        if sc == 0x1F:
+            return '_'                      # ←
+        if 0x20 <= sc <= 0x3F:
+            return chr(sc)                  # Space, Zahlen, Interpunktion
+        if 0x41 <= sc <= 0x5A:
+            if getattr(self.screen, 'charset_mode', 'lower') == 'lower':
+                return chr(sc)               # A-Z
+            return ' '                       # upper-Modus: Grafik
+        return ' '                          # Grafik/Sonderzeichen
+
+
+class ScrollbackViewer(TextSelectionMixin, tk.Toplevel):
     """Viewer für Scrollback Buffer mit PETSCII Rendering
     
     - 2500 Zeilen pro Page
@@ -499,6 +605,15 @@ class ScrollbackViewer(tk.Toplevel):
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
         self.canvas.bind("<Button-4>", self._on_mousewheel)
         self.canvas.bind("<Button-5>", self._on_mousewheel)
+        
+        # Text selection & copy (right click)
+        self._sel_start = None  # (col, abs_row)
+        self._sel_end = None    # (col, abs_row)
+        self._sel_moved = False
+        self.canvas.bind("<ButtonPress-1>", self._on_sel_press)
+        self.canvas.bind("<B1-Motion>", self._on_sel_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_sel_release)
+        self.canvas.bind("<Button-3>", self._on_copy_click)
         
         # Resize Event
         self.canvas.bind("<Configure>", self._on_resize)
@@ -594,6 +709,59 @@ class ScrollbackViewer(tk.Toplevel):
             start = self.scroll_offset / page_lines
             end = (self.scroll_offset + viewport_lines) / page_lines
             self.scrollbar.set(start, min(1, end))
+    
+    def _get_abs_start(self):
+        """Absolute row number of first visible row"""
+        page_start = self.current_page * self.lines_per_page
+        return page_start + self.scroll_offset
+    
+    def _get_char_dims(self):
+        """Gets (char_width, char_height) of renderer"""
+        zoom = getattr(self.renderer, 'zoom', 2)
+        char_w = getattr(self.renderer, 'char_width', 8 * zoom)
+        char_h = getattr(self.renderer, 'char_height', 8 * zoom)
+        return char_w, char_h
+    
+    def _canvas_to_cell(self, event):
+        """Converts canvas coordinates to (col, abs_row) in scrollback"""
+        try:
+            char_w, char_h = self._get_char_dims()
+            abs_start = self._get_abs_start()
+            col = int(event.x / char_w)
+            row = abs_start + int(event.y / char_h)
+            col = max(0, min(self.screen.width - 1, col))
+            row = max(0, min(self.screen.height - 1, row))
+            return col, row
+        except Exception:
+            return 0, 0
+    
+    def _draw_selection(self):
+        """Draws the selection overlay on the scrollback canvas"""
+        self.canvas.delete('selection')
+        if not self._sel_start or not self._sel_end:
+            return
+        try:
+            (c1, r1), (c2, r2) = self._sel_start, self._sel_end
+            left, right = min(c1, c2), max(c1, c2)
+            top, bottom = min(r1, r2), max(r1, r2)
+            char_w, char_h = self._get_char_dims()
+            abs_start = self._get_abs_start()
+            x1 = left * char_w
+            y1 = (top - abs_start) * char_h
+            x2 = (right + 1) * char_w
+            y2 = (bottom + 1 - abs_start) * char_h
+            self.canvas.create_rectangle(
+                x1, y1, x2, y2,
+                outline='#FFFFFF', width=1,
+                fill='#4080FF', stipple='gray50',
+                tags='selection'
+            )
+        except Exception as e:
+            print(f"Selection draw error: {e}")
+    
+    def _show_copy_message(self, msg):
+        """Shows a status message for the clipboard"""
+        self.status_var.set(msg)
     
     def page_first(self):
         """Erste Page, Anfang"""
@@ -697,12 +865,18 @@ class ScrollbackViewer(tk.Toplevel):
 
     def render_viewport(self):
         """Rendert den sichtbaren Bereich - füllt das ganze Fenster"""
-        from PIL import Image
-
         # Amiga-Renderer hat keine C64-Cell-API -> generischer Fensterausschnitt
         if self.amiga_mode:
             self._render_viewport_amiga()
-            return
+        else:
+            self._render_viewport()
+        
+        # Textauswahl-Overlay nach jedem Rendern wiederherstellen
+        self._draw_selection()
+    
+    def _render_viewport(self):
+        """Rendert den sichtbaren Bereich (C64) - füllt das ganze Fenster"""
+        from PIL import Image
         
         # Canvas-Größe holen
         canvas_width = self.canvas.winfo_width()

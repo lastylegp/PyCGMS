@@ -28,8 +28,7 @@ class TransferProtocol(Enum):
     XMODEM_1K = "XModem-1K"
     YMODEM = "YModem"
     ZMODEM = "ZModem"
-    PUNTER = "Punter"              # Single-File Punter (kein Header)
-    PUNTER_MULTI = "Multi-Punter"  # Multi-Punter Batch (Header pro Datei)
+    PUNTER = "Punter"              # C1 + Multi autodetect, no timeouts
     TURBOMODEM = "TurboModem"      # Ultra-fast! 10-20x faster than XModem
     # HIGH-SPEED PROTOCOLS (für LAN - maximaler Speed)
     # YMODEM_G entfernt - funktioniert nicht zuverlässig über Telnet
@@ -325,10 +324,10 @@ class FileTransfer:
         Returns:
             True bei Erfolg, False bei Fehler
         """
-        # Punter Upload:
+        # Punter Upload (autodetect via file count):
         # - Single File: _punter_send() - OHNE Header (BBS kennt Filename bereits)
-        # - Multi-File: _punter_send_multi() - MIT Header pro Datei
-        if self.protocol in [TransferProtocol.PUNTER, TransferProtocol.PUNTER_MULTI]:
+        # - Multi-File: _punter_send_multi() - MIT Header pro Datei + End-Marker
+        if self.protocol == TransferProtocol.PUNTER:
             if isinstance(filepath, list):
                 if len(filepath) == 0:
                     self.log("✗ ERROR: Empty file list")
@@ -344,8 +343,8 @@ class FileTransfer:
         # Andere Protokolle: Nur erstes File nehmen
         if isinstance(filepath, list) and len(filepath) > 1:
             if self.protocol not in [TransferProtocol.YMODEM, TransferProtocol.RAWTCP,
-                                     TransferProtocol.PUNTER, TransferProtocol.PUNTER_MULTI,
-                                     TransferProtocol.TURBOMODEM, TransferProtocol.ZMODEM]:
+                                      TransferProtocol.PUNTER,
+                                      TransferProtocol.TURBOMODEM, TransferProtocol.ZMODEM]:
                 self.log(f"⚠ {self.protocol.value} unterstützt kein Multi-File, nehme erste Datei")
                 filepath = filepath[0]
         
@@ -395,7 +394,6 @@ class FileTransfer:
         Args:
             filepath: Pfad zum Speichern (bei Punter: kann Verzeichnis sein)
             callback: Optional - Funktion(bytes_received, status_msg)
-        
         Returns:
             True bei Erfolg, False bei Fehler
             
@@ -407,7 +405,7 @@ class FileTransfer:
         self.log(f"\n>>> receive_file() called")
         self.log(f"    filepath: {filepath}")
         self.log(f"    protocol: {self.protocol}")
-        
+
         # Reset last received filepath
         self.last_received_filepath = None
         
@@ -418,8 +416,7 @@ class FileTransfer:
                 return self._ymodem_receive(filepath, callback)
             elif self.protocol == TransferProtocol.ZMODEM:
                 return self._zmodem_receive(filepath, callback)
-            elif self.protocol in [TransferProtocol.PUNTER, TransferProtocol.PUNTER_MULTI]:
-                # Beide Punter-Varianten verwenden Header
+            elif self.protocol == TransferProtocol.PUNTER:
                 self.log("    -> routing to _punter_receive()")
                 return self._punter_receive(filepath, callback)
             elif self.protocol == TransferProtocol.TURBOMODEM:
@@ -1879,67 +1876,6 @@ class FileTransfer:
         
         return block
     
-    def _punter_wait_for_code(self, expected_codes, timeout=30):
-        """
-        Wartet auf einen der erwarteten 3-Byte Punter Codes
-        
-        Args:
-            expected_codes: Liste von erwarteten Codes (z.B. [b'GOO', b'BAD'])
-            timeout: Timeout in Sekunden
-        
-        Returns:
-            Empfangener Code oder None bei Timeout/Cancel
-        """
-        buffer = bytearray()
-        end_time = time.time() + timeout
-        
-        # Live-Update: Zeige worauf gewartet wird
-        codes_str = ', '.join(c.decode('ascii', errors='replace') for c in expected_codes)
-        self._live_update('WAIT', None, f"Waiting for: {codes_str}")
-        self.waiting_for_input = True
-        self.waiting_for_codes = expected_codes
-        
-        while time.time() < end_time:
-            # Check für Cancel
-            if self.cancel_requested:
-                self.log("    CANCELLED by user")
-                self.waiting_for_input = False
-                return None
-            
-            byte = self._read_byte(timeout=0.5)
-            if byte is not None:
-                buffer.append(byte)
-                
-                # Live-Update: Zeige empfangene Bytes
-                self._live_update('IN', bytes([byte]), f"byte: 0x{byte:02X}")
-                
-                # Suche nach einem der erwarteten Codes im Buffer
-                for code in expected_codes:
-                    if len(buffer) >= len(code):
-                        # Prüfe ob Code am Ende des Buffers ist
-                        if buffer[-len(code):] == bytearray(code):
-                            hex_str = ' '.join(f'{b:02X}' for b in buffer)
-                            ascii_str = ''.join(chr(b) if 32 <= b < 127 else '.' for b in buffer)
-                            self.punter_log(f"    [IN] {hex_str} |{ascii_str}| -> matched {code}")
-                            self._live_update('IN', code, f"MATCHED: {code.decode('ascii', errors='replace')}")
-                            self.waiting_for_input = False
-                            return code
-                
-                # Buffer nicht zu groß werden lassen
-                if len(buffer) > 20:
-                    buffer = buffer[-10:]
-        
-        self.waiting_for_input = False
-        self.log(f"    TIMEOUT waiting for {expected_codes}")
-        self._live_update('STATUS', None, f"TIMEOUT waiting for {codes_str}")
-        if buffer:
-            hex_str = ' '.join(f'{b:02X}' for b in buffer)
-            ascii_str = ''.join(chr(b) if 32 <= b < 127 else '.' for b in buffer)
-            self.punter_log(f"    [IN] Buffer at timeout: {hex_str} |{ascii_str}|")
-        else:
-            self.punter_log(f"    [IN] Buffer at timeout: EMPTY (no data received)")
-        return None
-    
     def _punter_send_code(self, code):
         """Sendet einen Punter Code"""
         hex_str = ' '.join(f'{b:02X}' for b in code)
@@ -1955,665 +1891,614 @@ class FileTransfer:
         self._live_update('OUT', block[:20], f"Block ({len(block)} bytes)")
         self.send_raw(block)
     
-    def _punter_end_off_sequence(self):
+    # -- Punter C1 upload core: timeout-free sender primitives --
+    # The sender side is reactive (wait code -> reply), so "no timeouts"
+    # means: wait indefinitely, retry resends indefinitely. Loops exit only
+    # on cancel/disconnect. Duplicate codes from peer stall-resends slide
+    # through the 3-byte window harmlessly.
+
+    def _pc1_wait_code(self, expected):
+        """Wait indefinitely for one of the 3-byte codes (sliding window).
+
+        Returns the matched code, or None on cancel/disconnect.
         """
-        Führt die End-Off Sequenz durch (Steps 7-16 bzw. 22-31)
-        Buggy im Original: Sender sendet 3x S/B mit je 1s Pause
+        if isinstance(expected, bytes):
+            expected = [expected]
+        codes_str = ', '.join(c.decode('ascii', errors='replace') for c in expected)
+        self._live_update('WAIT', None, f"Waiting for: {codes_str}")
+        self.waiting_for_input = True
+        self.waiting_for_codes = list(expected)
+        window = bytearray()
+        try:
+            while not self._pc1_gone():
+                b = self._pc1_get_byte(0.5)
+                if b is None:
+                    continue
+                window.append(b)
+                self._live_update('IN', bytes([b]), f"byte: 0x{b:02X}")
+                if len(window) > 3:
+                    window = window[-3:]
+                if len(window) == 3:
+                    for code in expected:
+                        if bytes(window) == bytes(code):
+                            self.punter_log(f"    [IN] matched {bytes(code)}")
+                            self._live_update('IN', bytes(code),
+                                              f"MATCHED: {bytes(code).decode('ascii', errors='replace')}")
+                            return bytes(code)
+            return None
+        finally:
+            self.waiting_for_input = False
+
+    def _pc1_send_block_and_confirm(self, block, what):
+        """Send a block; GOO confirms, BAD triggers ACK + resend on fresh S/B.
+
+        Every GOO is answered with ACK (the peer's GOO/ACK handshake needs
+        it). Returns True once confirmed, False on cancel/disconnect.
         """
-        # Sende ACK
+        while not self._pc1_gone():
+            self._punter_send_block(block)
+            self.log(f"Sent {what} ({len(block)} bytes)")
+            r = self._pc1_wait_code([self.PUNTER_GOO, self.PUNTER_BAD])
+            if r is None:
+                return False
+            if r == self.PUNTER_GOO:
+                self._punter_send_code(self.PUNTER_ACK)
+                return True
+            self.log(f"    BAD for {what} - ACK, wait S/B, resend")
+            self._punter_send_code(self.PUNTER_ACK)
+            if self._pc1_wait_code([self.PUNTER_SB]) is None:
+                return False
+        return False
+
+    def _pc1_send_one(self, file_data, ftype, callback=None, label="file"):
+        """One C1 file, sender side (spec phases A+B). No header/end marker.
+
+        ftype: 0 = PRG, 1 = SEQ. Extra GOO/ACK rounds (which receivers like
+        ours insert around the type block) are answered, so single- and
+        double-round receivers both work.
+        """
+        if not file_data:
+            self.log("ERROR: Refusing to send empty file (not representable in C1)")
+            return False
+        filesize = len(file_data)
+
+        # Phase A: file type
+        if self._pc1_wait_code([self.PUNTER_GOO]) is None:
+            return False
         self._punter_send_code(self.PUNTER_ACK)
-        
-        # Warte auf S/B
-        code = self._punter_wait_for_code([self.PUNTER_SB], timeout=10)
-        if code != self.PUNTER_SB:
-            self.log("    WARNING: Expected S/B in end-off")
+        # S/B advances; a stray GOO is an extra handshake round -> ACK it.
+        while True:
+            r = self._pc1_wait_code([self.PUNTER_SB, self.PUNTER_GOO])
+            if r is None:
+                return False
+            if r == self.PUNTER_SB:
+                break
+            self._punter_send_code(self.PUNTER_ACK)
+        type_block = self._punter_make_block(bytes([ftype & 0xFF]), 0xC9, 0xFFFF)
+        if not self._pc1_send_block_and_confirm(type_block, "type block"):
             return False
-        
-        # Sende SYN
+        # Same extra-round tolerance before end-off A.
+        while True:
+            r = self._pc1_wait_code([self.PUNTER_SB, self.PUNTER_GOO])
+            if r is None:
+                return False
+            if r == self.PUNTER_SB:
+                break
+            self._punter_send_code(self.PUNTER_ACK)
+        # End-off A: S/B -> SYN, SYN -> 3x S/B (spec sender behavior).
         self._punter_send_code(self.PUNTER_SYN)
-        
-        # Warte auf SYN
-        code = self._punter_wait_for_code([self.PUNTER_SYN], timeout=10)
-        if code != self.PUNTER_SYN:
-            self.log("    WARNING: Expected SYN in end-off")
+        if self._pc1_wait_code([self.PUNTER_SYN]) is None:
             return False
-        
-        # Sende S/B und warte (3x mit je 1s Pause - Bug im Original)
         for i in range(3):
+            if self._pc1_gone():
+                return False
             self._punter_send_code(self.PUNTER_SB)
-            time.sleep(1.0)
-        
+            if i < 2:
+                time.sleep(0.3)  # pacing between repeats, not a timeout
+
+        # Phase B: receiver opens with GOO/ACK, then S/B for the header block.
+        if self._pc1_wait_code([self.PUNTER_GOO]) is None:
+            return False
+        self._punter_send_code(self.PUNTER_ACK)
+        if self._pc1_wait_code([self.PUNTER_SB]) is None:
+            return False
+        chunks = [file_data[i:i + 248] for i in range(0, filesize, 248)]
+        header = self._punter_make_block(b'', len(chunks[0]) + 7, 0x0000)
+        if not self._pc1_send_block_and_confirm(header, "header block"):
+            return False
+
+        # Data blocks.
+        idx = 1
+        pos = 0
+        for n, chunk in enumerate(chunks):
+            if self._pc1_gone():
+                return False
+            if self._pc1_wait_code([self.PUNTER_SB]) is None:
+                return False
+            last = (n == len(chunks) - 1)
+            if last:
+                blk = self._punter_make_block(bytes(chunk), len(chunk) + 7, 0xFFFF)
+            else:
+                remaining = filesize - pos - len(chunk)
+                nxt = 255 if remaining >= 248 else remaining + 7
+                blk = self._punter_make_block(bytes(chunk), nxt, idx)
+            if not self._pc1_send_block_and_confirm(blk, f"datablock {idx}"):
+                return False
+            pos += len(chunk)
+            idx += 1
+            self.log(f"Datablock {idx - 1}: {len(chunk)} bytes, total {pos}/{filesize}")
+            if callback:
+                callback(pos, filesize, f"{label}: Block {idx - 1}")
+
+        # End-off B.
+        if self._pc1_wait_code([self.PUNTER_SB]) is None:
+            return False
+        self._punter_send_code(self.PUNTER_SYN)
+        if self._pc1_wait_code([self.PUNTER_SYN]) is None:
+            return False
+        for i in range(3):
+            if self._pc1_gone():
+                return False
+            self._punter_send_code(self.PUNTER_SB)
+            if i < 2:
+                time.sleep(0.3)  # pacing between repeats, not a timeout
+
+        self.log(f"✓ Sent {filesize} bytes")
+        if callback:
+            callback(filesize, filesize, f"{label}: Complete!")
         return True
-    
+
     def _punter_send(self, filepath, callback=None):
         """
-        Punter C1 Send - Sendet eine EINZELNE Datei (OHNE Header!)
-        
-        Bei Single-File Upload:
-        - Das BBS hat bereits den Upload-Modus gestartet
-        - SENDER startet mit GOO um Transfer zu initiieren
-        - Client sendet NUR die Daten, KEINEN Header!
-        - Der Dateiname wurde bereits vom User im BBS eingegeben
-        
-        Flow:
-        1. Sender sendet GOO um Transfer zu starten
-        2. Punter Batch Flow (nur Daten, kein Header)
-        3. End-Off mit 5x $04$09
+        Punter C1 Send - single file, no header (the BBS already knows the
+        name). Timeout-free: waits as long as the receiver needs.
         """
         import os
-        
+
         self.log(f"\n{'='*60}")
         self.log(f"PUNTER C1 SEND (Single - No Header): {filepath}")
         self.log(f"{'='*60}")
-        
-        # SENDER startet mit GOO!
-        self.log("Sender initiates with GOO...")
-        self._punter_send_code(self.PUNTER_GOO)
-        time.sleep(0.3)
-        
-        # Datei senden (OHNE vorherigen Header!)
-        success = self._punter_send_after_header(filepath, callback)
-        
-        if success:
-            # Single File Ende: 5x $04$09 senden
-            self.log("\n--- Sending End-Off: 5x $04$09 ---")
-            time.sleep(0.3)
-            end_signal = bytes([0x04, 0x09])
-            for i in range(5):
-                self.send_raw(end_signal)
-                self.log(f"    Sent $04$09 {i+1}/5")
-                time.sleep(0.1)
+
+        self._pc1_stash = bytearray()
+        try:
+            with open(filepath, 'rb') as f:
+                file_data = f.read()
+        except OSError as e:
+            self.log(f"ERROR: Cannot read {filepath}: {e}")
+            return False
+
+        self.log(f"File size: {len(file_data)} bytes")
+        ok = self._pc1_send_one(file_data, self._punter_ftype_of(filepath),
+                                callback, os.path.basename(filepath))
+        if ok:
             self.log(f"\n✓ PUNTER SEND COMPLETE: {filepath}")
-        
-        return success
+        return ok
+
+    @staticmethod
+    def _punter_ftype_of(filepath):
+        """0 = PRG, 1 = SEQ, by file extension."""
+        import os
+        ext = os.path.splitext(filepath)[1].lower()
+        return 1 if ext in ['.seq', '.txt', '.s'] else 0
     
     def _punter_receive(self, filepath, callback=None):
         """
-        Punter C1 Receive - Empfängt eine oder mehrere Dateien
-        
-        Bei Multi-Punter: Nach jedem File prüfen ob ein weiterer Header kommt
-        
-        Flow:
-        1. Client sendet GOO um Bereitschaft zu signalisieren
-        2. BBS antwortet mit Header ODER GOO/ACK (Transfer-Modus)
-        3. Header: 10×TAB + Filename,type + CR
-        4. Punter Batch Flow
-        5. Nach End-Off: Prüfen ob weiterer Header kommt
+        Punter C1 Receive - single/multi autodetect, no timeout dependency.
+
+        Protocol: https://www.pagetable.com/?p=1663 (receiver logic ported
+        from CGTerm punter.c: every step is send-code-until-expected-reply).
+        Per file (receiver side): GOO/ACK, 8-byte type block, GOO/ACK,
+        S/B/SYN, SYN/S/B, GOO/ACK, 7-byte header block, data blocks,
+        S/B/SYN, SYN/S/B. Multi-Punter wraps each file in
+        16xTAB + FILENAME,P|S + CR ... 16xTAB + 16xEOT + CR (END marker).
+
+        The mode is autodetected from the byte stream. Nothing aborts on
+        silence: short internal windows only trigger re-sends, so laggy BBS
+        just transfer slower. Stop via cancel.
         """
         import os
-        
+
         self.log(f"\n{'='*60}")
         self.log(f"PUNTER C1 RECEIVE: {filepath}")
         self.log(f"{'='*60}")
-        
-        # Debug: Connection info
+
         self.log(f"Connection type: {type(self.connection)}")
         if hasattr(self.connection, 'connected'):
             self.log(f"Connection connected: {self.connection.connected}")
-        
-        # Sammle alle Daten die schon in der Queue sind
-        all_received = bytearray()
+
+        # Fresh per-transfer state for the C1 core
+        self._pc1_stash = bytearray()
+        self._pc1_last_index = 0
+        self._pc1_last_payload = b''
+
+        # Collect bytes already queued (e.g. header sent before F3 was hit)
         if hasattr(self.connection, 'receive_queue'):
-            queue_items = 0
+            queued = 0
             while not self.connection.receive_queue.empty():
                 try:
                     data = self.connection.receive_queue.get_nowait()
-                    if data:
-                        if isinstance(data, str):
-                            data = data.encode('latin-1')
-                        all_received.extend(data)
-                        queue_items += 1
-                except:
+                except Exception:
                     break
-            self.log(f"    Collected {queue_items} items from queue, total {len(all_received)} bytes")
-        
-        if len(all_received) > 0:
-            self.byte_buffer.extend(all_received)
-        
-        file_count = 0
-        target_dir = filepath if os.path.isdir(filepath) else os.path.dirname(filepath)
-        
+                if data:
+                    if isinstance(data, str):
+                        data = data.encode('latin-1')
+                    self.byte_buffer.extend(data)
+                    queued += 1
+            self.log(f"    Collected {queued} queued chunk(s), buffer={len(self.byte_buffer)} bytes")
+
+        target_dir = filepath if os.path.isdir(filepath) else (os.path.dirname(filepath) or '.')
+        received = []
+
         try:
-            if callback:
-                callback(0, 0, "Signalisiere Bereitschaft...")
-            
-            # Sende GOO um dem BBS zu signalisieren dass wir bereit sind
-            self.log("Sending GOO to trigger BBS...")
-            self._punter_send_code(self.PUNTER_GOO)
-            time.sleep(0.2)
-            self._punter_send_code(self.PUNTER_GOO)
-            time.sleep(0.2)
-            self._punter_send_code(self.PUNTER_GOO)
-            
-            # Loop für mehrere Dateien (Multi-Punter)
             while True:
-                if callback:
-                    callback(0, 0, "Warte auf Header...")
-                
-                # Warte auf Header vom BBS (10×TAB + filename,type + CR)
-                self.log("Waiting for file header (10xTAB + filename,type + CR)...")
-                header = self._punter_wait_for_header(timeout=30)
-                
-                if header is None:
-                    if file_count == 0:
-                        self.log("ERROR: No header received")
-                        self.log("TIP: Press F3 IMMEDIATELY when BBS shows 'Start Transfer'")
-                        return False
-                    else:
-                        self.log(f"No more headers - transfer complete ({file_count} files)")
-                        break
-                
-                if header == "END":
-                    self.log(f"End marker received - transfer complete ({file_count} files)")
+                if self._pc1_gone():
                     break
-                
-                if header == "TRANSFER_MODE":
-                    # BBS ist schon im Transfer-Modus (Header wurde vom GUI konsumiert)
-                    self.log("BBS already in transfer mode - proceeding without header")
-                    filename = f"download_{int(time.time())}"
-                    ftype = 'P'
-                    
+
+                start = self._pc1_wait_start()
+                if start is None:  # cancel / disconnect
+                    break
+                if start[0] == 'end':
+                    self.log(f"End marker - transfer complete ({len(received)} file(s))")
+                    break
+
+                if start[0] == 'header':
+                    _, filename, ftype = start
+                    self.log(f"Received header: {filename},{ftype}")
+                    safe = filename
+                    for ch in '/\\:*?"<>|':
+                        safe = safe.replace(ch, '-')
+                    ext = '.seq' if ftype.upper() == 'S' else '.prg'
+                    if '.' not in safe:
+                        safe = safe + ext
+
+                    if not safe.endswith(ext):
+                        safe = safe + ext
+                        
+                    # for correctness, if it is a starzip file remove the extension
+                    if safe[0].isnumeric() and safe[1] == '!' and safe.endswith(ext):
+                        safe = safe[:-len(ext)]
+
+                    safe = safe.lower()
+                    current = os.path.join(target_dir, safe) if os.path.isdir(filepath) else filepath
+                    single_mode = False
+                    opened = False
+                elif start[0] == 'transfer-open':
+                    # Our probe GOO was answered with ACK: the opening
+                    # handshake is done, go straight to the type block.
+                    self.log("Sender handshake - single file without header")
                     if os.path.isdir(filepath):
-                        current_filepath = os.path.join(filepath, filename + ".PRG")
+                        current = os.path.join(filepath, f"download_{int(time.time())}.prg")
                     else:
-                        current_filepath = filepath
-                    
-                    success = self._punter_receive_transfer_mode(current_filepath, callback)
-                    if success:
-                        file_count += 1
-                        self.log(f"\n✓ File {file_count} received: {current_filepath}")
-                    continue
-                
-                filename, ftype = header
-                self.log(f"Received header: {filename},{ftype}")
-                
-                # Sanitize Filename
-                safe_filename = filename.replace('/', '-').replace('\\', '-').replace(':', '-')
-                safe_filename = safe_filename.replace('*', '-').replace('?', '-').replace('"', '-')
-                safe_filename = safe_filename.replace('<', '-').replace('>', '-').replace('|', '-')
-                if safe_filename != filename:
-                    self.log(f"    Sanitized filename: {filename} -> {safe_filename}")
-                
-                # Füge Dateiendung hinzu basierend auf Typ
-                ext = '.SEQ' if ftype.upper() == 'S' else '.PRG'
-                if not safe_filename.upper().endswith(ext):
-                    if '.' not in safe_filename:  # Nur wenn keine Endung vorhanden
-                        safe_filename = safe_filename + ext
-                        self.log(f"    Added extension: {safe_filename}")
-                
-                # Ziel-Pfad
-                if os.path.isdir(filepath):
-                    current_filepath = os.path.join(filepath, safe_filename)
-                else:
-                    current_filepath = filepath
-                
-                # Empfange Datei
-                success = self._punter_receive_after_header(current_filepath, callback)
-                
-                if success:
-                    file_count += 1
-                    self.log(f"\n✓ File {file_count} received: {current_filepath}")
-                    
-                    # Nach erfolgreichem Download: Prüfen ob weitere Files kommen
-                    # Sende GOO um dem BBS zu signalisieren dass wir bereit für mehr sind
-                    self.log("Checking for more files...")
-                    time.sleep(0.3)
-                else:
-                    self.log(f"ERROR: Failed to receive file {filename}")
-                    break
-            
-            if file_count > 0:
-                self.log(f"\n✓ PUNTER RECEIVE COMPLETE: {file_count} file(s)")
-                return True
-            else:
-                return False
-            
-        except Exception as e:
-            self.log(f"ERROR: {str(e)}")
-            import traceback
-            self.log(traceback.format_exc())
-            return False
-    
-    def _punter_do_end_off_client(self):
-        """
-        End-Off Sequenz als Client/Receiver
-        """
-        # Warte auf ACK
-        code = self._punter_wait_for_code([self.PUNTER_ACK, self.PUNTER_GOO], timeout=5)
-        if code == self.PUNTER_GOO:
-            self._punter_send_code(self.PUNTER_ACK)
-        
-        # Sende S/B
-        self._punter_send_code(self.PUNTER_SB)
-        
-        # Warte auf SYN
-        code = self._punter_wait_for_code([self.PUNTER_SYN], timeout=10)
-        if code == self.PUNTER_SYN:
-            self._punter_send_code(self.PUNTER_SYN)
-            self.log("SYN exchange OK")
-        
-        # BBS sendet 3x S/B - warten und ignorieren
-    
-    def _punter_receive_transfer_mode(self, filepath, callback=None):
-        """
-        Punter Receive wenn BBS schon im Transfer-Modus ist
-        (GOO+ACK wurde bereits empfangen, BBS erwartet S/B)
-        
-        Flow:
-        [GOO+ACK bereits empfangen]
-        S/B ->
-                                 <- Block1 (8 bytes)
-        GOO ->
-                                 <- ACK
-        S/B ->
-                                 <- SYN (End-Off Phase A)
-        SYN ->
-                                 <- S/B
-        [Phase B]
-        GOO ->
-                                 <- ACK  
-        S/B ->
-                                 <- Block2 (8 bytes)
-        GOO ->
-        [Datenblöcke]
-                                 <- ACK
-        S/B ->
-                                 <- Datablock
-        GOO ->
-        ...
-        """
-        self.log(f"\n--- PUNTER RECEIVE (transfer mode): {filepath} ---")
-        
-        # Extrahiere Dateiname für Callback
-        display_name = os.path.basename(filepath) if filepath else "download"
-        
-        try:
-            # ============================================================
-            # PHASE A: Block1
-            # ============================================================
-            self.log("Phase A: Block1 (BBS already sent GOO+ACK)")
-            
-            # BBS hat schon ACK gesendet, erwartet S/B
-            self._punter_send_code(self.PUNTER_SB)
-            
-            # Empfange Block1 (8 Bytes) - mit Retry bei Checksum-Fehler
-            max_retries = 3
-            block1 = None
-            for retry in range(max_retries):
-                block1 = self._punter_receive_block(timeout=15)
-                if block1 is not None:
-                    break  # Erfolg!
-                
-                # Checksum-Fehler - sende BAD
-                self.log(f"    BAD Block1 - sending BAD ({retry+1}/{max_retries})")
-                self._punter_send_code(self.PUNTER_BAD)
-                
-                # Warte auf ACK und sende S/B für Retry
-                code = self._punter_wait_for_code([self.PUNTER_ACK], timeout=10)
-                if code == self.PUNTER_ACK:
-                    self._punter_send_code(self.PUNTER_SB)
-                else:
-                    self.log("ERROR: No ACK after BAD for Block1")
-                    break
-            
-            if block1 is None:
-                self.log("ERROR: Failed to receive Block1 after retries")
-                return False
-            
-            self.log(f"Block1 received: {len(block1.get('payload', b''))+7} bytes")
-            
-            # Sende GOO
-            self._punter_send_code(self.PUNTER_GOO)
-            
-            # End-Off Phase A
-            code = self._punter_wait_for_code([self.PUNTER_ACK], timeout=10)
-            if code != self.PUNTER_ACK:
-                self.log("WARNING: No ACK in end-off A")
-            
-            self._punter_send_code(self.PUNTER_SB)
-            
-            code = self._punter_wait_for_code([self.PUNTER_SYN], timeout=10)
-            if code != self.PUNTER_SYN:
-                self.log("WARNING: No SYN in end-off A")
-            
-            self._punter_send_code(self.PUNTER_SYN)
-            
-            code = self._punter_wait_for_code([self.PUNTER_SB], timeout=10)
-            if code != self.PUNTER_SB:
-                self.log("WARNING: No S/B in end-off A")
-            
-            # ============================================================
-            # PHASE B: File Data (transfer_mode)
-            # ============================================================
-            self.log("Phase B: Data (transfer_mode)")
-            
-            # Flow nach S/B vom BBS:
-            # Client: GOO (mehrmals falls nötig)
-            # BBS: GOO
-            # Client: GOO  
-            # BBS: ACK
-            # Client: S/B
-            # BBS: Block2
-            
-            # Sende GOOs bis wir Antwort bekommen
-            got_response = False
-            for attempt in range(5):
-                self._punter_send_code(self.PUNTER_GOO)
-                time.sleep(0.2)
-                
-                # Prüfe ob Antwort da ist
-                code = self._punter_wait_for_code([self.PUNTER_GOO, self.PUNTER_ACK, self.PUNTER_SB], timeout=2)
-                if code is not None:
-                    self.log(f"    Phase B response after {attempt+1} GOOs: {code}")
-                    got_response = True
-                    break
-                self.log(f"    GOO attempt {attempt+1} - no response yet")
-            
-            if not got_response:
-                self.log("ERROR: No response to Phase B GOOs")
-                # Versuche trotzdem weiterzumachen
-                code = None
-            
-            if code == self.PUNTER_GOO:
-                # GOO empfangen - sende GOO zurück
-                self._punter_send_code(self.PUNTER_GOO)
-                
-                # Jetzt auf ACK warten
-                code = self._punter_wait_for_code([self.PUNTER_ACK], timeout=10)
-                self.log(f"    After GOO exchange: {code}")
-            
-            if code == self.PUNTER_SB:
-                # BBS hat schon S/B gesendet - direkt zum Block
-                self.log("    BBS sent S/B - proceeding to block")
-            elif code == self.PUNTER_ACK or code is None:
-                # Sende S/B
-                self._punter_send_code(self.PUNTER_SB)
-            
-            # Empfange Block2 (8 Bytes) - mit Retry bei Checksum-Fehler
-            block2 = None
-            for retry in range(max_retries):
-                block2 = self._punter_receive_block(timeout=15)
-                if block2 is not None:
-                    break  # Erfolg!
-                
-                # Checksum-Fehler - sende BAD
-                self.log(f"    BAD Block2 - sending BAD ({retry+1}/{max_retries})")
-                self._punter_send_code(self.PUNTER_BAD)
-                
-                # Warte auf ACK und sende S/B für Retry
-                code = self._punter_wait_for_code([self.PUNTER_ACK], timeout=10)
-                if code == self.PUNTER_ACK:
-                    self._punter_send_code(self.PUNTER_SB)
-                else:
-                    self.log("ERROR: No ACK after BAD for Block2")
-                    break
-            
-            if block2 is None:
-                self.log("ERROR: Failed to receive Block2 after retries")
-                return False
-            
-            self.log(f"Block2 received: {len(block2.get('payload', b''))+7} bytes, next_size={block2['next_size']}")
-            
-            # Sende GOO
-            self._punter_send_code(self.PUNTER_GOO)
-            
-            # Empfange Datenblöcke
-            file_data = bytearray()
-            block_count = 0
-            next_block_size = block2['next_size']  # Größe des ersten Datenblocks
-            
-            while True:
-                # Warte auf ACK
-                code = self._punter_wait_for_code([self.PUNTER_ACK, self.PUNTER_SYN], timeout=10)
-                if code is None:
-                    self.log("No response - ending")
-                    break
-                if code == self.PUNTER_SYN:
-                    self.log("SYN received - starting end-off")
-                    self._punter_send_code(self.PUNTER_SYN)
-                    break
-                
-                # Sende S/B
-                self._punter_send_code(self.PUNTER_SB)
-                
-                # Empfange Block mit erwarteter Größe - mit Retry bei Checksum-Fehler
-                max_retries = 3
-                data_block = None
-                for retry in range(max_retries):
-                    data_block = self._punter_receive_block(timeout=20, expected_size=next_block_size)
-                    if data_block is not None:
-                        break  # Erfolg!
-                    
-                    # Checksum-Fehler - sende BAD und warte auf erneutes S/B
-                    self.log(f"    BAD block - sending BAD ({retry+1}/{max_retries})")
-                    self._punter_send_code(self.PUNTER_BAD)
-                    
-                    # Warte auf ACK + S/B für Retry
-                    code = self._punter_wait_for_code([self.PUNTER_ACK], timeout=10)
-                    if code == self.PUNTER_ACK:
-                        self._punter_send_code(self.PUNTER_SB)
+                        current = filepath
+                    single_mode = True
+                    opened = True
+                else:  # unprompted GOO from sender: full flow incl. opening
+                    self.log("Sender GOO - single file without header")
+                    if os.path.isdir(filepath):
+                        current = os.path.join(filepath, f"download_{int(time.time())}.prg")
                     else:
-                        self.log("ERROR: No ACK after BAD")
+                        current = filepath
+                    single_mode = True
+                    opened = False
+
+                if callback:
+                    callback(0, 0, "Empfange Datei...")
+                if self._pc1_receive_one(current, callback, opened=opened):
+                    received.append(current)
+                    self.log(f"\n✓ File {len(received)} received: {current}")
+                else:
+                    self.log(f"ERROR receiving file -> {current}")
+                    if self._pc1_gone():
                         break
-                
-                if data_block is None:
-                    self.log("ERROR: Failed to receive data block after retries")
-                    break
-                
-                # Speichere next_size für nächsten Block
-                next_block_size = data_block['next_size']
-                
-                if data_block['payload']:
-                    file_data.extend(data_block['payload'])
-                block_count += 1
-                
-                self.log(f"Datablock {block_count}: {len(data_block['payload']) if data_block['payload'] else 0} bytes, " +
-                        f"total {len(file_data)}, is_last={data_block['is_last']}")
-                
-                if callback:
-                    callback(len(file_data), 0, f"{display_name}: Block {block_count}")
-                
-                # Sende GOO
-                self._punter_send_code(self.PUNTER_GOO)
-                
-                if data_block['is_last']:
-                    break
-            
-            # End-Off Phase B
-            code = self._punter_wait_for_code([self.PUNTER_ACK, self.PUNTER_SB], timeout=5)
-            if code == self.PUNTER_ACK:
-                self._punter_send_code(self.PUNTER_SB)
-                code = self._punter_wait_for_code([self.PUNTER_SYN], timeout=5)
-                if code == self.PUNTER_SYN:
-                    self._punter_send_code(self.PUNTER_SYN)
-            
-            # Datei speichern
-            if len(file_data) > 0:
-                with open(filepath, 'wb') as f:
-                    f.write(file_data)
-                
-                self.log(f"✓ Received {len(file_data)} bytes -> {filepath}")
-                if callback:
-                    # Sende FILE_COMPLETE Event für Dateiliste
-                    callback(len(file_data), len(file_data), 
-                            f"FILE_COMPLETE:{display_name}:{block_count}:{len(file_data)}")
-                    callback(len(file_data), len(file_data), f"{display_name}: Complete!")
+                    # Garbled start or slow BBS: back to sniffing, the probe
+                    # loop re-syncs instead of giving up.
+                    time.sleep(0.2)
+                    continue
+
+                if single_mode:
+                    break  # single file done - no probing, no waiting
+                time.sleep(0.1)
+
+            if received:
+                self.log(f"\n✓ PUNTER RECEIVE COMPLETE: {len(received)} file(s)")
                 return True
-            else:
-                self.log("ERROR: No data received")
-                return False
-            
+            return False
         except Exception as e:
             self.log(f"ERROR: {str(e)}")
             import traceback
             self.log(traceback.format_exc())
-            return False
-        time.sleep(3.5)
-        
-        # Flush
-        while self._read_byte(timeout=0.1) is not None:
-            pass
-        
-        return True
-    
-    def _punter_receive_end_off_cbase(self):
-        """Alias für Kompatibilität"""
-        return self._punter_do_end_off_client()
-    
-    def _punter_receive_block(self, timeout=10, expected_size=None):
+            return len(received) > 0
+
+    # -- Punter C1 download core: timeout-free primitives (CGTerm logic) --
+    # Short internal windows below only trigger re-sends, never aborts, so
+    # laggy links just transfer slower. Anything returning None/False means
+    # cancel or disconnect - the only two ways these loops stop.
+    _PC1_RESEND = 3.0   # stall window that triggers a re-send, never an abort
+
+    def _pc1_gone(self):
+        """True on user cancel or closed connection."""
+        return self.cancel_requested or getattr(self.connection, 'connected', True) is False
+
+    def _pc1_get_byte(self, window):
+        """One stream byte within `window` seconds, else None. Never fails."""
+        end = time.time() + window
+        while time.time() < end:
+            if self.cancel_requested:
+                return None
+            if len(self._pc1_stash) > 0:
+                return self._pc1_stash.pop(0)
+            if len(self.byte_buffer) > 0:
+                return self.byte_buffer.pop(0)
+            data = None
+            if hasattr(self.connection, 'get_received_data'):
+                try:
+                    data = self.connection.get_received_data(timeout=0.05)
+                except Exception:
+                    data = None
+            if data:
+                if isinstance(data, str):
+                    data = data.encode('latin-1')
+                if len(data) == 1:
+                    return data[0]
+                self.byte_buffer.extend(data[1:])
+                return data[0]
+            if getattr(self.connection, 'connected', True) is False:
+                return None
+            time.sleep(0.005)
+        return None
+
+    def _pc1_recv_string(self, send):
+        """Send `send`, collect 3 bytes; re-send on stall. None if gone."""
+        self._punter_send_code(send)
+        buf = bytearray()
+        stall = time.time()
+        while len(buf) < 3:
+            if self._pc1_gone():
+                return None
+            b = self._pc1_get_byte(0.2)
+            if b is not None:
+                buf.append(b)
+                stall = time.time()
+            elif time.time() - stall >= self._PC1_RESEND:
+                self._punter_send_code(send)
+                stall = time.time()
+        return bytes(buf)
+
+    def _pc1_handshake(self, send, expect):
+        """Send `send` until `expect` arrives (CGTerm punter_handshake)."""
+        while not self._pc1_gone():
+            r = self._pc1_recv_string(send)
+            if r is None:
+                return False
+            if r == expect:
+                return True
+            if expect == self.PUNTER_ACK and r in (b'CKA', b'KAC'):
+                # Misaligned ACK (see CGTerm): swallow rest, accept it
+                self._pc1_get_byte(0.1)
+                if r == b'CKA':
+                    self._pc1_get_byte(0.1)
+                return True
+            self.punter_log(f"    [HANDSHAKE] want {expect} got {r} -> retry")
+        return False
+
+    def _pc1_recv_block(self, length, data_out=None):
+        """Receive exactly `length` bytes (CGTerm punter_recv_block port).
+
+        Returns next block size, or -1 on cancel/disconnect/remote-cancel.
+        Payload (if length > 8) is appended to data_out.
         """
-        Empfängt einen Punter Block
-        
-        Block Format: [0-1] additive checksum, [2-3] cyclic checksum,
-                      [4] next block size, [5-6] block index, [7+] payload
-        
-        Args:
-            timeout: Timeout in Sekunden
-            expected_size: Erwartete Block-Größe (aus vorherigem next_size)
-                          Wenn None, wird 255 angenommen für Datenblöcke
-        
-        Returns:
-            dict mit 'payload', 'next_size', 'block_index', 'is_last'
-            oder None bei Fehler
-        """
-        block_data = bytearray()
-        end_time = time.time() + timeout
-        
-        # Lese erste 3 Bytes um zu prüfen ob es ACK/GOO ist
-        initial = bytearray()
-        while len(initial) < 3 and time.time() < end_time:
-            byte = self._read_byte(timeout=0.5)
-            if byte is not None:
-                initial.append(byte)
-            else:
-                break
-        
-        if len(initial) < 3:
-            self.log("ERROR: Could not read initial bytes")
-            return None
-        
-        # Prüfe ob es ACK oder GOO ist (überspringen)
-        if bytes(initial) == b'ACK' or bytes(initial) == b'GOO':
-            self.punter_log(f"    [SKIP] Skipped {bytes(initial)}")
-            # Lese nächste 3 Bytes für Block-Header Start
-            initial = bytearray()
-            while len(initial) < 3 and time.time() < end_time:
-                byte = self._read_byte(timeout=0.5)
-                if byte is not None:
-                    initial.append(byte)
-                else:
+        while not self._pc1_gone():
+            self._punter_send_code(self.PUNTER_SB)
+            block = bytearray()
+            stall = time.time()
+            restart = False
+            while len(block) < length:
+                if self._pc1_gone():
+                    return -1
+                b = self._pc1_get_byte(0.2)
+                if b is None:
+                    if time.time() - stall >= 5.0:
+                        self.punter_log("    [BLOCK] stall -> BAD/ACK restart")
+                        if not self._pc1_handshake(self.PUNTER_BAD, self.PUNTER_ACK):
+                            return -1
+                        restart = True
+                        break
+                    continue
+                stall = time.time()
+                block.append(b)
+                n = len(block)
+                if n == 3 and bytes(block) == b'S/B':
+                    self.log("    Remote cancelled transfer (S/B)")
+                    return -1
+                if n == 4 and bytes(block[:3]) == b'ACK':
+                    if block[3] == 0x41:  # overlapping 'A'CKA: restart block
+                        restart = True
+                        break
+                    block = block[3:]  # late ACK: skip it, keep trailing byte
+                elif n == 8 and bytes(block[2:8]) in (b'ACKACK', b'CKACKA', b'KACKAC'):
+                    restart = True  # lost sync: restart block
                     break
-        
-        # initial enthält jetzt die ersten 3 Bytes des Blocks
-        block_data.extend(initial)
-        
-        # Lese Rest des Headers (brauchen noch 4 bytes für total 7)
-        while len(block_data) < 7 and time.time() < end_time:
-            byte = self._read_byte(timeout=1)
-            if byte is not None:
-                block_data.append(byte)
-        
-        if len(block_data) < 7:
-            self.log("ERROR: Could not read block header")
-            if block_data:
-                hex_str = ' '.join(f'{b:02X}' for b in block_data)
-                self.punter_log(f"    Partial data received: {hex_str}")
-            return None
-        
-        # Log Header
-        hex_str = ' '.join(f'{b:02X}' for b in block_data[:7])
-        self.punter_log(f"    [IN] Block header: {hex_str}")
-        
-        # Parse Header
-        additive = block_data[0] | (block_data[1] << 8)
-        cyclic = block_data[2] | (block_data[3] << 8)
-        next_size = block_data[4]
-        block_index = block_data[5] | (block_data[6] << 8)
-        
-        is_last = (block_index >= 0xFF00)  # Hi-byte >= 0xFF = letzter Block
-        
-        self.punter_log(f"    Block header parsed: add={additive:04X} cyc={cyclic:04X} next={next_size} idx={block_index:04X} last={is_last}")
-        
-        # Bestimme wie viele Bytes wir lesen müssen
-        if expected_size is not None and expected_size > 7:
-            # Verwende expected_size aus vorherigem Block
-            target_size = expected_size
+            if restart:
+                continue
+            add = block[0] | (block[1] << 8)
+            cyc = block[2] | (block[3] << 8)
+            calc_add, calc_cyc = self._punter_calc_checksums(bytes(block[4:]))
+            if calc_add != add or calc_cyc != cyc:
+                self.log(f"    CHECKSUM ERROR (got {add:04X}/{cyc:04X} "
+                         f"calc {calc_add:04X}/{calc_cyc:04X}) -> BAD")
+                if not self._pc1_handshake(self.PUNTER_BAD, self.PUNTER_ACK):
+                    return -1
+                continue
+            self._pc1_last_index = block[5] | (block[6] << 8)
+            self._pc1_last_payload = bytes(block[7:])
+            self.punter_log(f"    [IN] block len={len(block)} next={block[4]} "
+                            f"idx={self._pc1_last_index:04X}")
+            if not self._pc1_handshake(self.PUNTER_GOO, self.PUNTER_ACK):
+                return -1
+            if data_out is not None:
+                # Data block (type/header blocks pass no buffer). Note: a
+                # data block may be only 8 bytes (1 payload byte), so this
+                # must not depend on the block length.
+                data_out.extend(block[7:])
+            return block[4]
+        return -1
+
+    def _pc1_receive_one(self, filepath, callback=None, opened=False):
+        """One C1 file transfer, receiver side (spec phases A+B).
+
+        If opened is True, the opening GOO/ACK handshake was already
+        completed by the sniffing probe - go straight to the type block.
+        """
+        import os
+        display = os.path.basename(filepath) if filepath else "download"
+        # Phase A: file type
+        if not opened:
+            if not self._pc1_handshake(self.PUNTER_GOO, self.PUNTER_ACK):
+                return False
+        if self._pc1_recv_block(8) < 0:
+            return False
+        if not self._pc1_handshake(self.PUNTER_GOO, self.PUNTER_ACK):
+            return False
+        if not self._pc1_handshake(self.PUNTER_SB, self.PUNTER_SYN):
+            return False
+        if not self._pc1_handshake(self.PUNTER_SYN, self.PUNTER_SB):
+            return False
+        if not self._pc1_handshake(self.PUNTER_GOO, self.PUNTER_ACK):
+            return False
+        # Phase B: file data (7-byte header block carries first next-size)
+        nxt = self._pc1_recv_block(7)
+        if nxt < 0:
+            return False
+        data = bytearray()
+        blocks = 0
+        while self._pc1_last_index < 0xFF00 and nxt >= 7:
+            if self._pc1_gone():
+                return False
+            nxt = self._pc1_recv_block(nxt, data)
+            if nxt < 0:
+                return False
+            blocks += 1
+            self.log(f"Datablock {blocks}: total {len(data)}")
+            if callback:
+                callback(len(data), 0, f"{display}: Block {blocks}")
+        # End-off B (sender emits 3x S/B here - drain the repeats)
+        if self._pc1_handshake(self.PUNTER_SB, self.PUNTER_SYN):
+            self._pc1_handshake(self.PUNTER_SYN, self.PUNTER_SB)
+            self._pc1_drain_sb()
         else:
-            # Standard: 255 bytes für Datenblöcke, 8 für Typ-Blöcke
-            target_size = 255 if next_size > 0 else 8
-        
-        self.punter_log(f"    [BLOCK] Target size: {target_size}, already have: {len(block_data)}")
-        
-        # Lese Payload bis target_size erreicht
-        read_start = time.time()
-        while len(block_data) < target_size and time.time() < end_time:
-            byte = self._read_byte(timeout=0.5)
-            if byte is not None:
-                block_data.append(byte)
-            elif time.time() - read_start > 2.0:
-                # Nach 2 Sekunden ohne Fortschritt -> Warnung aber weitermachen
-                self.punter_log(f"    [WARN] Slow read: {len(block_data)}/{target_size} bytes after 2s")
-                read_start = time.time()  # Reset für nächste Warnung
-        
-        # Warnung wenn nicht alle Bytes empfangen
-        if len(block_data) < target_size:
-            self.punter_log(f"    [WARN] Block incomplete: {len(block_data)}/{target_size} bytes")
-        
-        payload = bytes(block_data[7:])
-        
-        # Log kompletten Block
-        hex_str = ' '.join(f'{b:02X}' for b in block_data[:32])
-        if len(block_data) > 32:
-            hex_str += f"... ({len(block_data)} total)"
-        self.punter_log(f"    [IN] Block complete: {hex_str}")
-        
-        # Checksum verifizieren (über bytes [4..end])
-        checksum_data = bytes(block_data[4:])
-        calc_add, calc_cyc = self._punter_calc_checksums(checksum_data)
-        
-        if calc_add != additive or calc_cyc != cyclic:
-            self.log(f"    CHECKSUM ERROR! " +
-                    f"received: add={additive:04X} cyc={cyclic:04X}, " +
-                    f"calc: add={calc_add:04X} cyc={calc_cyc:04X}")
-            # Rückgabe None signalisiert dass BAD gesendet werden sollte
-            return None
-        
-        return {
-            'payload': payload,
-            'next_size': next_size,
-            'block_index': block_index,
-            'is_last': is_last
-        }
-    
-    def _punter_receive_end_off(self):
-        """
-        Empfängt die End-Off Sequenz (als Receiver)
-        """
-        # Warte auf ACK
-        code = self._punter_wait_for_code([self.PUNTER_ACK], timeout=10)
-        if code != self.PUNTER_ACK:
+            self.log("Done, but closing handshake timed out")
+        if len(data) == 0:
+            self.log("ERROR: No data received")
             return False
-        
-        # Sende S/B
-        self._punter_send_code(self.PUNTER_SB)
-        
-        # Warte auf SYN
-        code = self._punter_wait_for_code([self.PUNTER_SYN], timeout=10)
-        if code != self.PUNTER_SYN:
-            return False
-        
-        # Sende SYN
-        self._punter_send_code(self.PUNTER_SYN)
-        
-        # Erwarte 3x S/B (mit Pausen) - wir ignorieren sie einfach
-        # Warte 2 Sekunden wie in der Doku empfohlen
-        time.sleep(2.0)
-        
-        # Flush buffer
-        while self._read_byte(timeout=0.1) is not None:
-            pass
-        
+        with open(filepath, 'wb') as f:
+            f.write(data)
+        self.log(f"✓ Received {len(data)} bytes -> {filepath}")
+        if callback:
+            callback(len(data), len(data), f"FILE_COMPLETE:{display}:{blocks}:{len(data)}")
+            callback(len(data), len(data), f"{display}: Complete!")
         return True
+
+    def _pc1_drain_sb(self):
+        """Discard the repeated S/B the sender emits at end-off (spec bug);
+        anything else is stashed for the next file sniffing."""
+        idle_end = time.time() + 1.5
+        hard_end = time.time() + 4.0
+        tail = bytearray()
+        while time.time() < min(idle_end, hard_end):
+            if self._pc1_gone():
+                break
+            b = self._pc1_get_byte(0.2)
+            if b is None:
+                continue
+            tail.append(b)
+            if len(tail) >= 3 and bytes(tail[-3:]) == b'S/B':
+                tail.clear()  # one repeat swallowed - more may follow (~1s apart)
+                idle_end = time.time() + 1.5
+            elif len(tail) > 6:
+                break  # not S/B repeats - keep for sniffing
+        if tail:
+            self._pc1_stash.extend(tail)
+
+    def _pc1_parse_header(self, hbuf):
+        """Parse a TAB..CR line. Returns ('header', name, type)/('end',)/None."""
+        if not hbuf:
+            return None
+        eots = sum(1 for b in hbuf if b == 0x04)
+        text = bytes(b for b in hbuf if b != 0x04)
+        try:
+            s = text.decode('latin-1')
+        except Exception:
+            return None
+        if eots >= 10 or (eots >= 1 and not any(c.isalnum() for c in s)):
+            self.log("    END marker detected")
+            return ('end',)
+        if ',' in s:
+            name, _, typ = s.rpartition(',')
+            name = name.strip(' \x04')
+            typ = (typ.strip(' \x00\x04')[:1].upper() or 'P')
+            if any(c.isalnum() for c in name):
+                return ('header', name, typ if typ in ('P', 'S') else 'P')
+            return None
+        # Header present but no ",P"/",S" type suffix: default to P (.prg).
+        name = s.strip(' \x04')
+        if any(c.isalnum() for c in name):
+            return ('header', name, 'P')
+        return None  # menu noise behind TABs - keep sniffing, never abort
+
+    def _pc1_wait_start(self):
+        """Probe loop: send GOO, scan for header / END / handshake reply.
+
+        Returns ('header', name, ftype), ('transfer-open',) (our probe was
+        ACKed - opening handshake done), ('transfer',) (unprompted sender
+        GOO - opening still to do), ('end',) or None (cancel/disconnect).
+        Never times out on silence; the probe spacing below only sets the
+        re-send rate, a laggy BBS just answers later.
+        """
+        tabs = 0
+        hbuf = bytearray()
+        in_header = False
+        tail = bytearray()
+        next_probe = 0.0
+        while not self._pc1_gone():
+            now = time.time()
+            if now >= next_probe:
+                self._punter_send_code(self.PUNTER_GOO)
+                next_probe = now + 2.0
+            b = self._pc1_get_byte(0.2)
+            if b is None:
+                continue
+            if b == 0x09:
+                tabs += 1
+                if tabs == 10:
+                    hbuf = bytearray()
+                    in_header = True
+                tail.clear()
+                continue
+            if in_header:
+                if b == 0x0D:
+                    res = self._pc1_parse_header(hbuf)
+                    tabs = 0
+                    hbuf = bytearray()
+                    in_header = False
+                    tail.clear()
+                    if res is not None:
+                        return res
+                    continue
+                hbuf.append(b)
+                if len(hbuf) > 64:
+                    tabs = 0  # noise, not a header
+                    hbuf = bytearray()
+                    in_header = False
+                continue
+            tail.append(b)
+            if len(tail) > 3:
+                tail = tail[-3:]
+            if bytes(tail) == b'ACK':
+                return ('transfer-open',)
+            if bytes(tail) == b'GOO':
+                return ('transfer',)
+            tabs = 0
+        return None
     
     # ==================================================================================
     # MULTI-PUNTER SUPPORT
@@ -2621,121 +2506,78 @@ class FileTransfer:
     
     def _punter_send_multi(self, filepaths, callback=None):
         """
-        Punter Batch Send - Sendet mehrere Dateien
-        
-        Multi-File Flow:
-        1. Für jede Datei:
-           - Header senden: S/B filename,type CR
-           - Datei mit Batch Flow senden
-           - Nach Datei (außer letzte): S/B SYN / SYN S/B Handshake
-        2. Am Ende: 5x $04$09 (End-Off)
+        Multi-Punter Send: per file 16xTAB + FILENAME,P|S + CR, then the C1
+        flow; after the last file 16xTAB + 16xEOT + CR (spec). No timeouts:
+        each step waits as long as the receiver needs.
         """
         import os
-        
+
         self.log(f"\n{'='*60}")
         self.log(f"PUNTER BATCH SEND: {len(filepaths) if isinstance(filepaths, list) else 1} files")
         self.log(f"{'='*60}")
-        
+
+        self._pc1_stash = bytearray()
         if isinstance(filepaths, str):
             filepaths = [filepaths]
-        
+
         total_files = len(filepaths)
-        
+
         for idx, filepath in enumerate(filepaths):
+            if self._pc1_gone():
+                return False
             filename = os.path.basename(filepath)
-            is_last_file = (idx == total_files - 1)
-            
-            # Datei-Typ bestimmen
-            ext = os.path.splitext(filepath)[1].lower()
-            ftype = 'S' if ext in ['.seq', '.txt', '.s'] else 'P'
-            
-            self.log(f"\n--- File {idx+1}/{total_files}: {filename} ---")
-            
-            # Header senden: S/B filename,type CR
+            ftype = 'S' if self._punter_ftype_of(filepath) == 1 else 'P'
+
+            self.log(f"\n--- File {idx + 1}/{total_files}: {filename} ---")
             self._punter_send_file_header(filename, ftype)
-            
-            # Sende Datei
+
+            try:
+                with open(filepath, 'rb') as f:
+                    file_data = f.read()
+            except OSError as e:
+                self.log(f"ERROR: Cannot read {filepath}: {e}")
+                return False
+
             if callback:
-                def file_callback(sent, total, status):
-                    callback(sent, total, f"[{idx+1}/{total_files}] {filename}: {status}")
+                def file_callback(sent, total, status, _i=idx, _n=filename):
+                    callback(sent, total, f"[{_i + 1}/{total_files}] {_n}: {status}")
             else:
                 file_callback = None
-            
-            success = self._punter_send_after_header(filepath, file_callback)
-            
-            if not success:
+
+            if not self._pc1_send_one(file_data,
+                                      1 if ftype == 'S' else 0,
+                                      file_callback, filename):
                 self.log(f"ERROR: Failed to send {filename}")
                 return False
-            
-            self.log(f"File {idx+1}/{total_files} complete: {filename}")
-            
-            # Zwischen Files: S/B SYN / SYN S/B Handshake (NICHT am Ende!)
-            if not is_last_file:
-                self.log("\n--- Inter-file handshake: S/B SYN / SYN S/B ---")
-                time.sleep(0.3)
-                
-                # Sende S/B
-                self._punter_send_code(self.PUNTER_SB)
-                
-                # Warte auf SYN vom BBS
-                code = self._punter_wait_for_code([self.PUNTER_SYN], timeout=10)
-                if code != self.PUNTER_SYN:
-                    self.log("WARNING: No SYN received, continuing anyway")
-                else:
-                    self.log("Got SYN from BBS")
-                
-                time.sleep(0.2)
-                
-                # Sende SYN
-                self._punter_send_code(self.PUNTER_SYN)
-                
-                # Warte auf S/B vom BBS
-                code = self._punter_wait_for_code([self.PUNTER_SB], timeout=10)
-                if code == self.PUNTER_SB:
-                    self.log("Got S/B from BBS - ready for next file")
-                
-                time.sleep(0.5)
-        
-        # ============================================================
-        # END-OFF: 5x $04$09 senden (NUR am Ende des gesamten Batch!)
-        # ============================================================
-        self.log("\n--- Sending End-Off: 5x $04$09 ---")
-        time.sleep(0.5)
-        
-        end_signal = bytes([0x04, 0x09])
-        for i in range(5):
-            self.send_raw(end_signal)
-            self.log(f"    Sent $04$09 {i+1}/5")
-            time.sleep(0.1)
-        
+            self.log(f"File {idx + 1}/{total_files} complete: {filename}")
+
+        # End marker after the last file (spec, not 5x$04$09).
+        self._punter_send_end_marker()
         self.log(f"\n✓ PUNTER BATCH COMPLETE: {total_files} files sent")
         return True
     
     def _punter_send_file_header(self, filename, ftype='P'):
         """
-        Sendet Punter Batch Datei-Header
-        
-        Format: 10× TAB + Filename + "," + Type + CR
-        (Basierend auf tcpser Log: C64 sendet 0x09 0x09 ... + filename)
-        
+        Sendet Multi-Punter Datei-Header (Spec: 16x TAB + Name,Typ + CR).
+
         Args:
             filename: Dateiname (max 16 Zeichen für C64)
             ftype: 'P' für PRG, 'S' für SEQ
         """
         # Dateiname auf 16 Zeichen begrenzen und bereinigen
         clean_name = filename[:16].upper()
-        
-        # Header bauen: 10× TAB (0x09) + Filename + "," + Type + CR (0x0D)
+
+        # Header bauen: 16x TAB (0x09) + Filename + "," + Type + CR (0x0D)
         header = bytearray()
-        header.extend(b'\x09' * 10)  # 10× TAB
+        header.extend(b'\x09' * 16)  # 16x TAB (Spec)
         header.extend(clean_name.encode('ascii', errors='replace'))
         header.append(ord(','))
         header.append(ord(ftype.upper()))
         header.append(0x0D)  # CR
-        
+
         hex_str = ' '.join(f'{b:02X}' for b in header)
         self.punter_log(f"    [OUT] Header: {hex_str}")
-        self.log(f"    [OUT] Header: 10xTAB + {clean_name},{ftype} + CR")
+        self.log(f"    [OUT] Header: 16xTAB + {clean_name},{ftype} + CR")
         self.send_raw(bytes(header))
     
     def _punter_send_end_marker(self):
@@ -2753,870 +2595,6 @@ class FileTransfer:
         self.punter_log(f"    [OUT] End marker: {hex_str}")
         self.log(f"    [OUT] End marker: 16xTAB + 16xEOT + CR")
         self.send_raw(bytes(end_marker))
-    
-    def _punter_wait_for_file_header(self, timeout=60):
-        """
-        Wartet auf Multi-Punter Datei-Header vom BBS
-        
-        Returns:
-            (filename, type) Tuple bei Erfolg
-            'END' wenn End-Marker empfangen
-            None bei Timeout
-        """
-        return self._punter_wait_for_header(timeout)
-    
-    def _punter_send_after_header(self, filepath, callback=None):
-        """
-        Punter Send NACH Header (S/B filename,type CR wurde bereits gesendet)
-        
-        Korrekter Flow laut Punter C1 Batch Schema:
-        
-        [Header bereits gesendet]
-                                         <- GOO
-        GOO ->
-                                         <- GOO  
-        ACK ->
-                                         <- S/B
-        8 Byte Block1 (ff 01 06 04 00 ff ff 01) ->
-                                         <- GOO
-        ACK ->
-                                         <- S/B
-        SYN ->
-                                         <- SYN
-        S/B ->
-                                         <- GOO (Phase B)
-        ACK ->
-                                         <- S/B
-        8 Byte Block2 (identisch: ff 01 06 04 00 ff ff 01) ->
-                                         <- GOO
-        [Loop für Datenblöcke]
-        ACK ->
-                                         <- S/B
-        Datablock ->
-                                         <- GOO
-        [Nach letztem Block]
-        ACK ->
-                                         <- S/B
-        SYN ->
-                                         <- SYN
-        S/B ->
-        """
-        import os
-        
-        self.log(f"\n--- PUNTER SEND (after header): {filepath} ---")
-        
-        try:
-            # Datei laden
-            with open(filepath, 'rb') as f:
-                file_data = f.read()
-            
-            filesize = len(file_data)
-            self.log(f"File size: {filesize} bytes")
-            
-            # Datei-Typ bestimmen
-            ext = os.path.splitext(filepath)[1].lower()
-            file_type = 1 if ext in ['.seq', '.txt', '.s'] else 0
-            
-            # Block-Größe: 255 Bytes total (7 Header + 248 Payload)
-            block_size = 255
-            payload_size = block_size - 7  # 248 bytes Nutzdaten pro Block
-            
-            # Standard 8-Byte Block für Phase A
-            # Im Referenz-Log: c8 02 96 08 c9 ff ff 01
-            # next_size = 0xC9 (201) wie im C64!
-            standard_block = self._punter_make_block(
-                bytes([0x01]),  # 1 Byte Payload
-                0xC9,           # next_size = 201 (wie C64!)
-                0xFFFF          # block_index = FFFF (last)
-            )
-            
-            # ============================================================
-            # PHASE A: File Type
-            # ============================================================
-            self.log("Phase A: File Type")
-            
-            # Korrekte Reihenfolge:
-            # 1. Warte auf GOO vom BBS
-            # 2. Sende GOO
-            # 3. Warte auf GOO vom BBS
-            # 4. Sende ACK
-            
-            # Warte auf GOO vom BBS (längerer Timeout)
-            code = self._punter_wait_for_code([self.PUNTER_GOO], timeout=60)
-            if code != self.PUNTER_GOO:
-                self.log("ERROR: No GOO from BBS after header")
-                return False
-            
-            time.sleep(0.2)  # Pause vor Antwort
-            
-            # Sende GOO als Antwort
-            self._punter_send_code(self.PUNTER_GOO)
-            
-            # Warte auf zweites GOO vom BBS
-            code = self._punter_wait_for_code([self.PUNTER_GOO], timeout=30)
-            if code != self.PUNTER_GOO:
-                self.log("ERROR: No second GOO from BBS")
-                return False
-            
-            time.sleep(0.2)  # Pause vor Antwort
-            
-            # Sende ACK
-            self._punter_send_code(self.PUNTER_ACK)
-            
-            # Warte auf S/B
-            code = self._punter_wait_for_code([self.PUNTER_SB], timeout=15)
-            if code != self.PUNTER_SB:
-                self.log("ERROR: No S/B for Block1")
-                return False
-            
-            time.sleep(0.2)  # Pause vor Block
-            
-            # Sende Block1 (8 Bytes) mit Retry bei BAD
-            max_retries = 3
-            for retry in range(max_retries):
-                self._punter_send_block(standard_block)
-                if retry == 0:
-                    self.log(f"Sent Block1 (8 bytes)")
-                else:
-                    self.log(f"Sent Block1 (retry {retry})")
-                
-                # Warte auf GOO/BAD
-                code = self._punter_wait_for_code([self.PUNTER_GOO, self.PUNTER_BAD], timeout=15)
-                
-                if code == self.PUNTER_GOO:
-                    break  # Erfolg!
-                elif code == self.PUNTER_BAD:
-                    self.log(f"    BAD received for Block1 - resending ({retry+1}/{max_retries})")
-                    time.sleep(0.2)
-                    # Bei BAD: Versuche S/B oder ACK abzuwarten, dann erneut senden
-                    code = self._punter_wait_for_code([self.PUNTER_SB, self.PUNTER_ACK], timeout=2)
-                    if code:
-                        self.log(f"    Got {code.decode()} after BAD")
-                    continue
-                else:
-                    self.log("ERROR: No GOO/BAD for Block1 (timeout)")
-                    return False
-            else:
-                # Alle Retries fehlgeschlagen
-                self.log(f"ERROR: Max retries ({max_retries}) for Block1")
-                return False
-            
-            time.sleep(0.2)  # Pause vor Antwort
-            
-            # End-Off Phase A
-            self._punter_send_code(self.PUNTER_ACK)
-            
-            code = self._punter_wait_for_code([self.PUNTER_SB], timeout=15)
-            if code != self.PUNTER_SB:
-                self.log("WARNING: No S/B in end-off A")
-            
-            time.sleep(0.2)  # Pause vor Antwort
-            
-            self._punter_send_code(self.PUNTER_SYN)
-            
-            code = self._punter_wait_for_code([self.PUNTER_SYN], timeout=15)
-            if code != self.PUNTER_SYN:
-                self.log("WARNING: No SYN in end-off A")
-            
-            time.sleep(0.3)  # Pause vor Phase B
-            
-            # S/B senden um Phase B zu starten
-            self._punter_send_code(self.PUNTER_SB)
-            
-            # ============================================================
-            # PHASE B: File Data
-            # ============================================================
-            self.log("Phase B: File Data")
-            
-            # Phase B Handshake:
-            # - BBS sollte jetzt mit GOO antworten
-            # - Sender sammelt GOOs
-            # - Nach mehreren GOOs sendet Sender ACK
-            # - BBS sendet dann S/B für Block2
-            
-            self.log("Waiting for GOOs from BBS...")
-            
-            goo_count = 0
-            for attempt in range(20):  # Max 20 Versuche
-                # Cancel-Check
-                if self.cancel_requested:
-                    self.log("CANCELLED by user")
-                    return False
-                
-                # DEBUG: Prüfe Queue und Socket bei jedem Versuch
-                if hasattr(self.connection, 'receive_queue'):
-                    qsize = self.connection.receive_queue.qsize()
-                    if qsize > 0:
-                        self.log(f"    [DEBUG] Queue has {qsize} items!")
-                
-                # Warte auf GOOs für 3 Sekunden
-                collect_end = time.time() + 3.0
-                while time.time() < collect_end:
-                    if self.cancel_requested:
-                        self.log("CANCELLED by user")
-                        return False
-                    
-                    code = self._punter_wait_for_code([self.PUNTER_GOO], timeout=1.0)
-                    if code == self.PUNTER_GOO:
-                        goo_count += 1
-                        self.log(f"    Got GOO #{goo_count}")
-                
-                # Nach genügend GOOs (mind. 3) können wir ACK senden
-                if goo_count >= 3:
-                    self.log(f"Got {goo_count} GOOs - sending ACK")
-                    break
-                
-                # Keine GOOs bekommen - sende S/B erneut
-                self.log(f"    No GOOs, sending S/B again (attempt {attempt+1}/20)")
-                self._punter_send_code(self.PUNTER_SB)
-                time.sleep(0.3)
-            
-            if goo_count < 1:
-                self.log("ERROR: No GOO from BBS for Phase B")
-                return False
-            
-            # Sende ACK
-            self._punter_send_code(self.PUNTER_ACK)
-            
-            # Warte auf S/B
-            code = self._punter_wait_for_code([self.PUNTER_SB], timeout=10)
-            if code != self.PUNTER_SB:
-                self.log("ERROR: No S/B for Block2")
-                return False
-            
-            # Block2 ist NUR Header (7 Bytes), KEIN Payload!
-            # Im Referenz-Log: ff 00 f8 07 ff 00 00
-            # next_size = 255 (voller nächster Block), block_index = 0
-            block2 = self._punter_make_block(
-                b'',            # KEIN Payload!
-                255,            # next_size = 255 (voller Block)
-                0x0000          # block_index = 0
-            )
-            
-            # Sende Block2 mit Retry bei BAD
-            for retry in range(max_retries):
-                self._punter_send_block(block2)
-                if retry == 0:
-                    self.log(f"Sent Block2 ({len(block2)} bytes - header only)")
-                else:
-                    self.log(f"Sent Block2 (retry {retry})")
-                
-                # Warte auf GOO/BAD
-                code = self._punter_wait_for_code([self.PUNTER_GOO, self.PUNTER_BAD], timeout=10)
-                
-                if code == self.PUNTER_GOO:
-                    break  # Erfolg!
-                elif code == self.PUNTER_BAD:
-                    self.log(f"    BAD received for Block2 - resending ({retry+1}/{max_retries})")
-                    time.sleep(0.2)
-                    # Bei BAD: Versuche S/B oder ACK abzuwarten, dann erneut senden
-                    code = self._punter_wait_for_code([self.PUNTER_SB, self.PUNTER_ACK], timeout=2)
-                    if code:
-                        self.log(f"    Got {code.decode()} after BAD")
-                    continue
-                else:
-                    self.log("ERROR: No GOO/BAD for Block2 (timeout)")
-                    return False
-            else:
-                # Alle Retries fehlgeschlagen
-                self.log(f"ERROR: Max retries ({max_retries}) for Block2")
-                return False
-            
-            # Sende alle Datenblöcke
-            bytes_sent = 0
-            block_index = 1
-            # max_retries ist bereits definiert (= 3)
-            
-            while bytes_sent < filesize:
-                # Cancel-Check
-                if self.cancel_requested:
-                    self.log("CANCELLED by user")
-                    return False
-                
-                # Sende ACK
-                self._punter_send_code(self.PUNTER_ACK)
-                
-                time.sleep(0.1)  # Kleine Pause
-                
-                # Warte auf S/B
-                code = self._punter_wait_for_code([self.PUNTER_SB], timeout=15)
-                if code != self.PUNTER_SB:
-                    self.log(f"ERROR: No S/B for datablock {block_index}")
-                    return False
-                
-                time.sleep(0.1)  # Kleine Pause vor Block
-                
-                # Block-Daten
-                chunk_start = bytes_sent
-                chunk_end = min(bytes_sent + payload_size, filesize)
-                chunk = file_data[chunk_start:chunk_end]
-                
-                is_last = (chunk_end >= filesize)
-                
-                if is_last:
-                    # Letzter Block: next_size = tatsächliche Größe, index = 0xFFFF
-                    next_size = len(chunk) + 7
-                    blk_idx = 0xFFFF
-                else:
-                    # next_size für nächsten Block
-                    remaining = filesize - chunk_end
-                    if remaining >= payload_size:
-                        next_size = 255  # Voller Block
-                    else:
-                        next_size = remaining + 7
-                    blk_idx = block_index
-                
-                data_block = self._punter_make_block(chunk, next_size, blk_idx)
-                
-                # Sende Block mit Retry bei BAD
-                for retry in range(max_retries):
-                    self._punter_send_block(data_block)
-                    
-                    if retry == 0:
-                        self.log(f"Datablock {block_index}: {len(chunk)} bytes, total {chunk_end}/{filesize}")
-                    else:
-                        self.log(f"Datablock {block_index}: {len(chunk)} bytes (retry {retry})")
-                    
-                    # Warte auf GOO/BAD
-                    code = self._punter_wait_for_code([self.PUNTER_GOO, self.PUNTER_BAD], timeout=15)
-                    
-                    if code == self.PUNTER_GOO:
-                        break  # Erfolg!
-                    elif code == self.PUNTER_BAD:
-                        self.log(f"    BAD received - resending block ({retry+1}/{max_retries})")
-                        time.sleep(0.2)  # Pause vor Retry
-                        # Bei BAD: Block direkt erneut senden (nächste Iteration)
-                        # Manche BBS senden S/B, manche nicht - versuche beides
-                        code = self._punter_wait_for_code([self.PUNTER_SB, self.PUNTER_ACK], timeout=2)
-                        if code:
-                            self.log(f"    Got {code.decode()} after BAD")
-                        # Block wird in nächster Iteration erneut gesendet
-                        continue
-                    else:
-                        self.log(f"ERROR: No GOO for datablock {block_index}")
-                        return False
-                else:
-                    # Alle Retries fehlgeschlagen
-                    self.log(f"ERROR: Max retries ({max_retries}) for block {block_index}")
-                    return False
-                
-                bytes_sent = chunk_end
-                block_index += 1
-                
-                if callback:
-                    callback(bytes_sent, filesize, f"Block {block_index-1}")
-            
-            # End-Off Phase B
-            time.sleep(0.2)  # Pause vor End-Off
-            
-            self._punter_send_code(self.PUNTER_ACK)
-            
-            code = self._punter_wait_for_code([self.PUNTER_SB], timeout=15)
-            if code != self.PUNTER_SB:
-                self.log("WARNING: No S/B in end-off B")
-            
-            time.sleep(0.2)  # Pause
-            
-            self._punter_send_code(self.PUNTER_SYN)
-            
-            code = self._punter_wait_for_code([self.PUNTER_SYN], timeout=15)
-            if code != self.PUNTER_SYN:
-                self.log("WARNING: No SYN in end-off B")
-            
-            time.sleep(0.2)  # Pause
-            
-            self._punter_send_code(self.PUNTER_SB)
-            
-            # KEIN End-of-Transfer Signal hier!
-            # Das wird vom Aufrufer gemacht:
-            # - Single File: 5x GOO in _punter_send()
-            # - Multi-File: S/B SYN / SYN S/B zwischen Files, 5x GOO am Ende
-            
-            time.sleep(0.3)  # Pause nach End-Off
-            
-            self.log(f"✓ Sent {filesize} bytes")
-            if callback:
-                callback(filesize, filesize, "Complete!")
-            
-            return True
-            
-        except Exception as e:
-            self.log(f"ERROR: {str(e)}")
-            import traceback
-            self.log(traceback.format_exc())
-            return False
-    
-    def _punter_receive_multi(self, target_dir, callback=None):
-        """
-        Punter Batch Receive - Empfängt mehrere Dateien
-        
-        Batch Format:
-        - Jede Datei: S/B filename,type CR
-        - Kein expliziter End-Marker - Timeout = Ende
-        
-        Args:
-            target_dir: Zielverzeichnis für empfangene Dateien
-            callback: Optional callback
-        
-        Returns:
-            Liste der empfangenen Dateipfade oder leere Liste bei Fehler
-        """
-        import os
-        
-        self.log(f"\n{'='*60}")
-        self.log(f"PUNTER BATCH RECEIVE: target={target_dir}")
-        self.log(f"{'='*60}")
-        
-        received_files = []
-        file_count = 0
-        
-        while True:
-            # Warte auf Punter Header (S/B filename,type CR)
-            self.log("\nWaiting for next file header...")
-            header_data = self._punter_wait_for_header(timeout=60)
-            
-            if header_data is None:
-                self.log("No more files (timeout)")
-                break
-            
-            filename, ftype = header_data
-            self.log(f"Received header: S/B {filename},{ftype}")
-            
-            # Sanitize Filename - ersetze ungültige Zeichen
-            safe_filename = filename.replace('/', '-').replace('\\', '-').replace(':', '-')
-            safe_filename = safe_filename.replace('*', '-').replace('?', '-').replace('"', '-')
-            safe_filename = safe_filename.replace('<', '-').replace('>', '-').replace('|', '-')
-            if safe_filename != filename:
-                self.log(f"    Sanitized filename: {filename} -> {safe_filename}")
-                filename = safe_filename
-            
-            # Ziel-Pfad erstellen
-            ext = '.SEQ' if ftype == 'S' else '.PRG'
-            if not filename.upper().endswith(ext):
-                if '.' not in filename:
-                    filename = filename + ext
-            
-            filepath = os.path.join(target_dir, filename)
-            
-            file_count += 1
-            self.log(f"\n--- File {file_count}: {filename} ---")
-            
-            if callback:
-                def file_callback(recv, total, status):
-                    callback(recv, total, f"[{file_count}] {filename}: {status}")
-            else:
-                file_callback = None
-            
-            success = self._punter_receive_after_header(filepath, file_callback)
-            
-            if success:
-                received_files.append(filepath)
-                self.log(f"File {file_count} complete: {filepath}")
-            else:
-                self.log(f"ERROR receiving file {file_count}: {filename}")
-                # Bei Fehler abbrechen
-                break
-        
-        self.log(f"\n✓ PUNTER BATCH RECEIVE COMPLETE: {len(received_files)} files")
-        return received_files
-    
-    def _punter_wait_for_header(self, timeout=60):
-        """
-        Wartet auf Multi-Punter Header oder End-Marker
-        ODER erkennt dass BBS schon im Transfer-Modus ist (GOO/ACK)
-        
-        Header Format: 10× TAB + Filename + "," + Type + CR
-        End-Marker: 16× TAB + 16× EOT + CR
-        
-        Returns:
-            ('filename', 'P'/'S') für Datei-Header
-            'TRANSFER_MODE' wenn BBS schon im Transfer-Modus (GOO+ACK erkannt)
-            'END' für End-Marker
-            None bei Timeout
-        """
-        buffer = bytearray()
-        raw_buffer = bytearray()
-        tab_count = 0
-        eot_count = 0
-        end_time = time.time() + timeout
-        
-        self.log("Waiting for Multi-Punter header (10xTAB + filename,type + CR)...")
-        self.log(f"    Timeout: {timeout}s")
-        self.log(f"    byte_buffer already has {len(self.byte_buffer)} bytes")
-        
-        loop_count = 0
-        last_log_time = time.time()
-        
-        # Für GOO/ACK Erkennung
-        goo_seen = False
-        ack_count = 0
-        
-        while time.time() < end_time:
-            loop_count += 1
-            
-            # Log alle 2 Sekunden
-            if time.time() - last_log_time >= 2.0:
-                self.log(f"    [WAIT] Loop {loop_count}, raw={len(raw_buffer)}, tabs={tab_count}, goo={goo_seen}, acks={ack_count}")
-                last_log_time = time.time()
-            
-            # Hole ein Byte - zuerst aus byte_buffer, dann aus Queue
-            byte = None
-            
-            # Aus byte_buffer
-            if len(self.byte_buffer) > 0:
-                byte = self.byte_buffer.pop(0)
-            else:
-                # Aus Queue
-                if hasattr(self.connection, 'get_received_data'):
-                    data = self.connection.get_received_data(timeout=0.05)
-                    if data:
-                        if isinstance(data, str):
-                            data = data.encode('latin-1')
-                        if len(data) > 0:
-                            byte = data[0]
-                            if len(data) > 1:
-                                self.byte_buffer.extend(data[1:])
-            
-            if byte is None:
-                time.sleep(0.01)
-                continue
-            
-            # Verarbeite das Byte
-            raw_buffer.append(byte)
-            
-            # Prüfe auf GOO oder ACK (3-Byte Sequenzen)
-            if len(raw_buffer) >= 3:
-                last3 = bytes(raw_buffer[-3:])
-                if last3 == b'GOO' and not goo_seen:
-                    goo_seen = True
-                    self.log(f"    [DETECTED] GOO from BBS!")
-                elif last3 == b'ACK':
-                    ack_count += 1
-                    self.log(f"    [DETECTED] ACK #{ack_count} from BBS!")
-                    
-                    # Wenn GOO + ACK, ist BBS bereit für Block-Transfer!
-                    if goo_seen and ack_count >= 1:
-                        self.log(f"    >>> BBS is in TRANSFER_MODE (GOO + ACK received)")
-                        self.log(f"    >>> Header was probably already sent before F3 was pressed")
-                        return 'TRANSFER_MODE'
-            
-            # TAB zählen
-            if byte == 0x09:
-                tab_count += 1
-                buffer = bytearray()  # Reset buffer nach TABs
-                eot_count = 0
-                continue
-            
-            # EOT zählen (End-Marker: 16× TAB + 16× EOT + CR)
-            if byte == 0x04 and tab_count >= 10:
-                eot_count += 1
-                if eot_count >= 10:
-                    self.log(f"    END MARKER detected!")
-                    return 'END'
-                continue
-            
-            # CR = Ende des Headers
-            if byte == 0x0D and tab_count >= 10 and len(buffer) > 0:
-                ascii_str = ''.join(chr(x) if 32 <= x < 127 else '.' for x in buffer)
-                self.log(f"    [HEADER] Found after {tab_count} TABs!")
-                self.log(f"    [HEADER] ascii: {ascii_str}")
-                
-                try:
-                    # Verwende latin-1 statt ASCII um Decode-Fehler zu vermeiden
-                    header_str = buffer.decode('latin-1')
-                    
-                    # Prüfe ob es ein gültiger Header ist (muss Komma enthalten)
-                    if ',' in header_str:
-                        parts = header_str.rsplit(',', 1)
-                        filename = parts[0]
-                        ftype = parts[1].upper() if len(parts) > 1 else 'P'
-                        
-                        # Prüfe ob Filename gültig aussieht (nicht nur Punkte/Sonderzeichen)
-                        if any(c.isalnum() for c in filename):
-                            self.log(f"    Header parsed: filename={filename}, type={ftype}")
-                            return (filename, ftype)
-                        else:
-                            self.log(f"    Invalid filename (no alphanumeric chars): {filename}")
-                    else:
-                        self.log(f"    No comma in header - not a valid file header")
-                        self.log(f"    This might be BBS screen output - assuming transfer complete")
-                        return 'END'
-                        
-                except Exception as e:
-                    self.log(f"    Header parse error: {e}")
-                    self.log(f"    Assuming transfer complete (BBS returned to menu)")
-                    return 'END'
-                    
-                buffer = bytearray()
-                tab_count = 0
-                continue
-            
-            # Normales Zeichen zum Buffer hinzufügen (nach TABs)
-            if tab_count >= 10 and byte not in [0x09, 0x04, 0x0D]:
-                buffer.append(byte)
-                eot_count = 0
-            else:
-                # Noch keine 10 TABs - reset
-                if byte != 0x09:
-                    tab_count = 0
-                    buffer = bytearray()
-        
-        self.log(f"    TIMEOUT waiting for header after {loop_count} loops")
-        self.log(f"    Received {len(raw_buffer)} bytes total, {tab_count} consecutive TABs")
-        if raw_buffer:
-            hex_str = ' '.join(f'{b:02X}' for b in raw_buffer[:80])
-            self.log(f"    [TIMEOUT] Buffer: {hex_str}")
-        return None
-    
-    def _punter_receive_after_header(self, filepath, callback=None):
-        """
-        Punter Receive NACH Header (10×TAB + filename,type + CR wurde empfangen)
-        
-        Korrekter Flow laut tcpser Download-Log:
-        
-        [Header wurde empfangen: 10×TAB + filename,type + CR]
-        GOO -> (mehrmals)                (Client initiiert!)
-                                         <- GOO
-        GOO ->
-                                         <- ACK
-        S/B ->
-                                         <- Block (8 bytes)
-        ...
-        """
-        self.log(f"\n--- PUNTER RECEIVE (after header): {filepath} ---")
-        
-        # Extrahiere Dateiname für Callback
-        display_name = os.path.basename(filepath) if filepath else "download"
-        
-        try:
-            # ============================================================
-            # PHASE A: File Type (Block1)
-            # ============================================================
-            self.log("Phase A: Block1")
-            
-            # Sende GOOs bis BBS antwortet (wie am Transfer-Start)
-            got_response = False
-            for attempt in range(5):
-                self._punter_send_code(self.PUNTER_GOO)
-                time.sleep(0.15)
-                
-                # Prüfe ob Antwort da ist
-                code = self._punter_wait_for_code([self.PUNTER_GOO, self.PUNTER_ACK], timeout=2)
-                if code is not None:
-                    self.log(f"    Got {code} after {attempt+1} GOOs")
-                    got_response = True
-                    break
-                self.log(f"    GOO attempt {attempt+1} - no response")
-            
-            if not got_response:
-                self.log("ERROR: No response to GOOs")
-                return False
-            
-            if code == self.PUNTER_GOO:
-                # Sende GOO zurück
-                self._punter_send_code(self.PUNTER_GOO)
-                
-                # Warte auf ACK
-                code = self._punter_wait_for_code([self.PUNTER_ACK], timeout=10)
-                if code != self.PUNTER_ACK:
-                    self.log("ERROR: No ACK from sender")
-                    return False
-            
-            # Sende S/B
-            self._punter_send_code(self.PUNTER_SB)
-            
-            # Empfange Block1 (8 Bytes) - mit Retry bei Checksum-Fehler
-            max_retries = 3
-            block1 = None
-            for retry in range(max_retries):
-                block1 = self._punter_receive_block(timeout=15)
-                if block1 is not None:
-                    break  # Erfolg!
-                
-                # Checksum-Fehler - sende BAD
-                self.log(f"    BAD Block1 - sending BAD ({retry+1}/{max_retries})")
-                self._punter_send_code(self.PUNTER_BAD)
-                
-                # Warte auf ACK und sende S/B für Retry
-                code = self._punter_wait_for_code([self.PUNTER_ACK], timeout=10)
-                if code == self.PUNTER_ACK:
-                    self._punter_send_code(self.PUNTER_SB)
-                else:
-                    self.log("ERROR: No ACK after BAD for Block1")
-                    break
-            
-            if block1 is None:
-                self.log("ERROR: Failed to receive Block1 after retries")
-                return False
-            
-            self.log(f"Block1 received: {len(block1.get('payload', b''))+7} bytes")
-            
-            # Sende GOO
-            self._punter_send_code(self.PUNTER_GOO)
-            
-            # End-Off Phase A
-            code = self._punter_wait_for_code([self.PUNTER_ACK], timeout=10)
-            if code != self.PUNTER_ACK:
-                self.log("WARNING: No ACK in end-off A")
-            
-            self._punter_send_code(self.PUNTER_SB)
-            
-            code = self._punter_wait_for_code([self.PUNTER_SYN], timeout=10)
-            if code != self.PUNTER_SYN:
-                self.log("WARNING: No SYN in end-off A")
-            
-            self._punter_send_code(self.PUNTER_SYN)
-            
-            code = self._punter_wait_for_code([self.PUNTER_SB], timeout=10)
-            if code != self.PUNTER_SB:
-                self.log("WARNING: No S/B in end-off A")
-            
-            # ============================================================
-            # PHASE B: File Data
-            # ============================================================
-            self.log("Phase B: Data")
-            
-            # Nach S/B vom BBS: GOO-GOO-ACK Handshake
-            # Sende GOOs bis Antwort
-            got_response = False
-            for attempt in range(5):
-                self._punter_send_code(self.PUNTER_GOO)
-                time.sleep(0.15)
-                
-                code = self._punter_wait_for_code([self.PUNTER_GOO, self.PUNTER_ACK], timeout=2)
-                if code is not None:
-                    self.log(f"    Phase B: Got {code} after {attempt+1} GOOs")
-                    got_response = True
-                    break
-            
-            if code == self.PUNTER_GOO:
-                self._punter_send_code(self.PUNTER_GOO)
-                code = self._punter_wait_for_code([self.PUNTER_ACK], timeout=10)
-            
-            if code != self.PUNTER_ACK:
-                self.log(f"WARNING: No ACK for Phase B (got: {code})")
-            
-            # Sende S/B
-            self._punter_send_code(self.PUNTER_SB)
-            
-            # Empfange Block2 (identisch: 8 Bytes) - mit Retry bei Checksum-Fehler
-            block2 = None
-            for retry in range(max_retries):
-                block2 = self._punter_receive_block(timeout=15)
-                if block2 is not None:
-                    break  # Erfolg!
-                
-                # Checksum-Fehler - sende BAD
-                self.log(f"    BAD Block2 - sending BAD ({retry+1}/{max_retries})")
-                self._punter_send_code(self.PUNTER_BAD)
-                
-                # Warte auf ACK und sende S/B für Retry
-                code = self._punter_wait_for_code([self.PUNTER_ACK], timeout=10)
-                if code == self.PUNTER_ACK:
-                    self._punter_send_code(self.PUNTER_SB)
-                else:
-                    self.log("ERROR: No ACK after BAD for Block2")
-                    break
-            
-            if block2 is None:
-                self.log("ERROR: Failed to receive Block2 after retries")
-                return False
-            
-            self.log(f"Block2 received: {len(block2.get('payload', b''))+7} bytes, next_size={block2['next_size']}")
-            
-            # Sende GOO
-            self._punter_send_code(self.PUNTER_GOO)
-            
-            # Empfange Datenblöcke
-            file_data = bytearray()
-            block_count = 0
-            next_block_size = block2['next_size']  # Größe des ersten Datenblocks
-            
-            while True:
-                # Warte auf ACK
-                code = self._punter_wait_for_code([self.PUNTER_ACK], timeout=10)
-                if code is None:
-                    self.log("No ACK - checking for end-off")
-                    break
-                
-                # Sende S/B
-                self._punter_send_code(self.PUNTER_SB)
-                
-                # Empfange Block mit erwarteter Größe - mit Retry bei Checksum-Fehler
-                max_retries = 3
-                data_block = None
-                for retry in range(max_retries):
-                    data_block = self._punter_receive_block(timeout=20, expected_size=next_block_size)
-                    if data_block is not None:
-                        break  # Erfolg!
-                    
-                    # Checksum-Fehler - sende BAD und warte auf erneutes S/B
-                    self.log(f"    BAD block - sending BAD ({retry+1}/{max_retries})")
-                    self._punter_send_code(self.PUNTER_BAD)
-                    
-                    # Warte auf ACK + S/B für Retry
-                    code = self._punter_wait_for_code([self.PUNTER_ACK], timeout=10)
-                    if code == self.PUNTER_ACK:
-                        self._punter_send_code(self.PUNTER_SB)
-                    else:
-                        self.log("ERROR: No ACK after BAD")
-                        break
-                
-                if data_block is None:
-                    self.log("ERROR: Failed to receive data block after retries")
-                    break
-                
-                # Speichere next_size für nächsten Block
-                next_block_size = data_block['next_size']
-                
-                if data_block['payload']:
-                    file_data.extend(data_block['payload'])
-                block_count += 1
-                
-                self.log(f"Datablock {block_count}: {len(data_block['payload']) if data_block['payload'] else 0} bytes, " +
-                        f"total {len(file_data)}, is_last={data_block['is_last']}")
-                
-                if callback:
-                    callback(len(file_data), 0, f"{display_name}: Block {block_count}")
-                
-                # Sende GOO
-                self._punter_send_code(self.PUNTER_GOO)
-                
-                if data_block['is_last']:
-                    break
-            
-            # End-Off Phase B
-            code = self._punter_wait_for_code([self.PUNTER_ACK], timeout=10)
-            if code == self.PUNTER_ACK:
-                self._punter_send_code(self.PUNTER_SB)
-                
-                code = self._punter_wait_for_code([self.PUNTER_SYN], timeout=10)
-                if code == self.PUNTER_SYN:
-                    self._punter_send_code(self.PUNTER_SYN)
-                    
-                    code = self._punter_wait_for_code([self.PUNTER_SB], timeout=10)
-            
-            # Datei speichern
-            if len(file_data) > 0:
-                with open(filepath, 'wb') as f:
-                    f.write(file_data)
-                
-                self.log(f"✓ Received {len(file_data)} bytes -> {filepath}")
-                if callback:
-                    # Sende FILE_COMPLETE Event für Dateiliste
-                    callback(len(file_data), len(file_data), 
-                            f"FILE_COMPLETE:{display_name}:{block_count}:{len(file_data)}")
-                    callback(len(file_data), len(file_data), f"{display_name}: Complete!")
-                return True
-            else:
-                self.log("ERROR: No data received")
-                return False
-            
-        except Exception as e:
-            self.log(f"ERROR: {str(e)}")
-            import traceback
-            self.log(traceback.format_exc())
-            return False
 
     def _turbomodem_send(self, filepath, callback):
         """TurboModem Send - 10-20x faster than XModem! Supports Multi-File!"""
